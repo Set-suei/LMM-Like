@@ -1,7 +1,7 @@
 name: astrbot_plugin_qq_like
 display_name: LLM点赞
-desc: 自动为发送“赞我”的用户送上最高上限的名片赞，并调用 LLM 结合当前人设与语音插件(genie)做出个性化反应。
-version: 1.1.0
+desc: 自动或自主为用户送上每日上限名片赞，支持LLM自主决策、函数调用(Tool Calling)、当前人设与语音插件(genie)个性化反应。
+version: 1.2.0
 author: Codex
 support_platforms:
   - aiocqhttp

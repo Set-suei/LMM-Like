@@ -22,11 +22,24 @@ except ImportError:
 @register(
     "astrbot_plugin_qq_like",
     "Codex",
-    "LLM点赞：为用户送上每日上限名片赞，支持当前人设与语音插件(genie)个性化反应",
-    "1.1.0",
+    "LLM点赞：为用户送上每日上限名片赞，支持LLM自主决策、函数调用(Tool Calling)、当前人设与语音插件(genie)个性化反应",
+    "1.2.0",
 )
 class QQLikePlugin(Star):
-    """QQ profile like plugin with LLM persona reaction and genie voice adaptation."""
+    """QQ profile like plugin with autonomous LLM decision, Tool Calling, persona reaction and genie voice adaptation."""
+
+    # Explicit command triggers (e.g. 赞我 / /赞我 / 点赞)
+    RE_LIKE_COMMAND = re.compile(
+        r"^[/~#.]?\s*(赞我|求赞|点赞|点个赞|帮我点赞|赞我一下|给我点赞|名片赞|like)\b",
+        re.IGNORECASE,
+    )
+
+    # Natural conversation like queries (e.g. 小千岁会给我点赞吗 / 能帮我点赞吗 / 愿不愿意给我点赞)
+    RE_LIKE_NATURAL = re.compile(
+        r"(?:会|能|可以|想|要|愿不愿意|愿意|敢不敢|能不能|帮我).*?(?:给我|给俺|帮我).*?(?:点赞|点个赞|赞我|名片赞|赞一下).*?(?:吗|嘛|吧|呗|不|？|\?|！|!)|"
+        r"(?:会给我点赞吗|能给我点赞吗|可以给我点赞吗|要不要给我点赞|给我点赞好不好|求点赞|给我点个赞嘛|给我点赞吧|给俺点赞|点赞我)",
+        re.IGNORECASE,
+    )
 
     def __init__(self, context: Context, config: dict[str, Any] | Any = None) -> None:
         super().__init__(context)
@@ -112,13 +125,12 @@ class QQLikePlugin(Star):
                     logger.debug(f"[qq_like] Failed to resolve bot from platform_manager: {exc}")
 
         if not callable(call_action_fn):
-            raise RuntimeError("未检测到可用的 aiocqhttp (OneBot v11) 平台客户端，点赞功能仅支持 QQ 协议端。")
+            raise RuntimeError("未找到可用的 OneBot (aiocqhttp) 客户端连接，无法调用点赞接口。")
 
-        self_id = str(getattr(getattr(event, "message_obj", None), "self_id", "") or "").strip()
-        if self_id and self_id.isdigit():
-            params.setdefault("self_id", int(self_id))
-
-        return await call_action_fn(action=action, **params)
+        res = call_action_fn(action, **params)
+        if inspect.isawaitable(res):
+            res = await res
+        return res
 
     # ─── Like Execution ────────────────────────────────────────────────
     async def _execute_send_like(
@@ -126,28 +138,36 @@ class QQLikePlugin(Star):
         event: AstrMessageEvent,
         target_id: int,
     ) -> tuple[int, int, str, str]:
-        """Send maximum likes in batches.
+        """Execute send_like in batches until max_likes or limit reached.
 
         Returns:
-            (actual_likes, max_likes_attempted, status, error_detail)
-            status in: "full_success", "partial_success", "already_maxed", "failed"
+            (actual_likes, max_likes, status, error_detail)
+            status: 'full_success' | 'partial_success' | 'already_maxed' | 'failed'
         """
         max_likes = max(1, int(self._cfg("max_likes", 20)))
-        chunk_size = max(1, min(int(self._cfg("chunk_size", 10)), 10))
+        chunk_size = max(1, int(self._cfg("chunk_size", 10)))
+
         actual_likes = 0
-        limit_keywords = ("上限", "限制", "最多", "100", "20003", "已达", "己达", "每天", "达到", "超限", "超过")
+        limit_keywords = ("上限", "超过", "频繁", "已达", "每天最多", "满", "limit", "max", "reach")
 
         while actual_likes < max_likes:
-            batch_times = min(max_likes - actual_likes, chunk_size)
+            batch_times = min(chunk_size, max_likes - actual_likes)
             try:
-                res = await self._call_action(
+                ret = await self._call_action(
                     event,
                     "send_like",
                     user_id=target_id,
                     times=batch_times,
                 )
-                if isinstance(res, dict) and res.get("status") == "failed":
-                    msg = str(res.get("wording") or res.get("message") or "")
+
+                ret_code = 0
+                msg = ""
+                if isinstance(ret, dict):
+                    ret_code = ret.get("retcode", 0)
+                    msg = str(ret.get("msg") or ret.get("wording") or "")
+
+                if ret_code != 0:
+                    logger.info(f"[qq_like] send_like retcode={ret_code}, msg={msg}")
                     if any(k in msg for k in limit_keywords):
                         if actual_likes > 0:
                             return actual_likes, max_likes, "partial_success", "已达今日上限"
@@ -251,49 +271,45 @@ class QQLikePlugin(Star):
                 except Exception:
                     pass
 
-        # Fallback to default persona
-        for method_name in ("get_default_persona_v3", "get_default_persona", "get_selected_default_persona"):
+        for method_name in ("get_default_persona_v3", "get_default_persona"):
             fn = getattr(pm, method_name, None)
             if fn is None:
                 continue
             try:
-                persona = await self._maybe_await(fn(umo))
-                prompt = self._extract_persona_prompt(persona)
-                if prompt:
-                    return prompt
+                for arg in (umo, None):
+                    try:
+                        persona = await self._maybe_await(fn(arg) if arg else fn())
+                        prompt = self._extract_persona_prompt(persona)
+                        if prompt:
+                            return prompt
+                    except TypeError:
+                        continue
             except Exception:
-                try:
-                    persona = await self._maybe_await(fn())
-                    prompt = self._extract_persona_prompt(persona)
-                    if prompt:
-                        return prompt
-                except Exception:
-                    continue
+                continue
+
+        for attr_name in ("default_persona_v3", "default_persona"):
+            val = getattr(pm, attr_name, None)
+            prompt = self._extract_persona_prompt(val)
+            if prompt:
+                return prompt
+
         return ""
 
     async def _get_persona_prompt(self, event: AstrMessageEvent) -> str:
-        """Retrieve current conversation active persona system prompt."""
+        """Get the currently effective persona system prompt for this event/session."""
         umo = getattr(event, "unified_msg_origin", None)
         persona_id = None
-        try:
-            cm = getattr(self.context, "conversation_manager", None)
-            if cm is not None and umo:
-                cid = await cm.get_curr_conversation_id(umo)
-                if cid:
-                    conv = await cm.get_conversation(umo, cid)
-                    persona_id = getattr(conv, "persona_id", None)
-        except Exception as exc:
-            logger.debug(f"[qq_like] Failed to read conversation persona: {exc}")
 
-        if not persona_id or persona_id == "[%None]":
-            persona_id = None
-            try:
-                cfg = self.context.persona_manager.acm.get_conf(umo)
-                persona_id = cfg.get("provider_settings", {}).get(
-                    "default_personality", "default"
-                )
-            except Exception:
-                persona_id = "default"
+        conversation = getattr(event, "conversation", None)
+        if conversation is not None:
+            persona_id = getattr(conversation, "persona_id", None)
+
+        if not persona_id:
+            msg_obj = getattr(event, "message_obj", None)
+            if msg_obj is not None:
+                session = getattr(msg_obj, "session", None)
+                if session is not None:
+                    persona_id = getattr(session, "persona_id", None)
 
         pm = getattr(self.context, "persona_manager", None)
         if pm is not None:
@@ -433,6 +449,88 @@ class QQLikePlugin(Star):
 
         return fallback
 
+    # ─── Autonomous Decision & Generation ──────────────────────────────
+    async def _decide_and_generate_reaction(
+        self,
+        event: AstrMessageEvent,
+        target_name: str,
+        sender_name: str,
+        raw_text: str,
+        is_self: bool,
+    ) -> tuple[bool, str]:
+        """Ask LLM to autonomously decide whether to like or reject based on current persona."""
+        target_desc = f"用户本人「{sender_name}」" if is_self else f"用户「{sender_name}」为你指定的群友「{target_name}」"
+
+        prompt = (
+            f"【群聊互动事件】：\n"
+            f"{target_desc}刚刚向你发送了：“{raw_text}”。对方正在向你求赞，或询问你愿不愿意/是否会给TA点赞。\n"
+            f"请你完全根据你当前的人设性格、喜好、对群友的说话口吻以及当前情境，自主判断：你【愿意】还是【不愿/拒绝】给TA点赞？\n"
+            f"【输出格式要求】：\n"
+            f"1. 如果你决定【同意/愿意】点赞：请在第一行开头输出 [ACTION:LIKE]，随后输出你的互动回复台词（可以爽快答应、傲娇表示勉为其难、宠溺、或者要求对方回赞等）。\n"
+            f"2. 如果你决定【拒绝/傲娇不给】点赞：请在第一行开头输出 [ACTION:REJECT]，随后输出你的互动回复台词（可以傲娇拒绝、戏弄、提出刁难要求或吐槽等）。\n"
+            f"【重要提示】：[ACTION:LIKE] 或 [ACTION:REJECT] 仅为系统动作标识符。后面的台词必须直接为角色对话，不要包含任何旁白、思考过程或多余解释。"
+        )
+
+        guide = str(self._cfg("custom_prompt_guide", "") or "").strip()
+        if guide:
+            prompt += f"\n额外人设指引：{guide}"
+
+        umo = getattr(event, "unified_msg_origin", None)
+        provider = self.context.get_using_provider(umo)
+        genie = self._find_genie()
+
+        fallback_agree = f"哼，看在你这么诚恳的份上，就给你点个赞吧~"
+
+        if provider is None:
+            return True, fallback_agree
+
+        try:
+            persona_prompt = await self._get_persona_prompt(event)
+            if genie is not None:
+                try:
+                    hint = genie.build_prompt_injection_hint() or ""
+                    if hint:
+                        persona_prompt = f"{persona_prompt or ''}{hint}"
+                except Exception as exc:
+                    logger.warning(f"[qq_like] 读取 genie 双语注入提示失败: {exc}")
+
+            resp = await provider.text_chat(
+                prompt=prompt,
+                session_id=None,
+                contexts=[],
+                image_urls=[],
+                system_prompt=persona_prompt or None,
+            )
+            text = (resp.completion_text or "").strip()
+            if not text:
+                return True, fallback_agree
+
+            should_like = True
+            if "[ACTION:REJECT]" in text:
+                should_like = False
+                text = text.replace("[ACTION:REJECT]", "").strip()
+            elif "[ACTION:LIKE]" in text:
+                should_like = True
+                text = text.replace("[ACTION:LIKE]", "").strip()
+
+            if text.startswith(('"', "“")) and text.endswith(('"', "”")):
+                text = text[1:-1].strip()
+
+            if genie is not None:
+                try:
+                    voice_plugin_reply = getattr(genie, "voice_plugin_reply", None)
+                    if callable(voice_plugin_reply):
+                        display = await voice_plugin_reply(event, text)
+                        if display:
+                            return should_like, display
+                except Exception as exc:
+                    logger.warning(f"[qq_like] genie 语音接入失败，按原文展示: {exc}")
+
+            return should_like, self._clean_display_text(text)
+        except Exception as exc:
+            logger.warning(f"[qq_like] 自主判断 LLM 生成失败: {exc}")
+            return True, fallback_agree
+
     # ─── Event Deduplication ───────────────────────────────────────────
     @staticmethod
     def _claim_event(event: AstrMessageEvent) -> bool:
@@ -442,15 +540,14 @@ class QQLikePlugin(Star):
         event._qq_like_claimed = True
         return False
 
-    # ─── Unified Execution Pipeline ────────────────────────────────────
+    # ─── Unified Execution Pipeline (Direct Command Flow) ─────────────
     async def _handle_like_flow(self, event: AstrMessageEvent):
-        """Unified like execution with cooldown and message yielding."""
+        """Unified like execution with cooldown and message yielding for explicit commands."""
         sender_id_str = str(event.get_sender_id() or "").strip()
         if not sender_id_str:
             yield event.plain_result("无法识别当前发送者 QQ。")
             return
 
-        # Cooldown & concurrent prevention
         now = time.time()
         cd = max(1, int(self._cfg("cooldown_seconds", 10)))
         last_time = self._user_last_triggered.get(sender_id_str, 0.0)
@@ -488,7 +585,6 @@ class QQLikePlugin(Star):
                 error_detail=err_detail,
             )
 
-            # Check if group and whether to At sender
             group_id = event.get_group_id()
             at_sender = bool(self._cfg("at_sender", False))
 
@@ -500,6 +596,62 @@ class QQLikePlugin(Star):
         except Exception as exc:
             logger.exception(f"[qq_like] 处理点赞流程发生异常: {exc}")
             yield event.plain_result(f"点赞时出现异常：{exc}")
+        finally:
+            self._in_flight_users.discard(sender_id_str)
+
+    # ─── Autonomous Decision Flow ──────────────────────────────────────
+    async def _handle_autonomous_flow(self, event: AstrMessageEvent):
+        """Autonomous decision flow: Let LLM decide whether to like or reject based on persona."""
+        sender_id_str = str(event.get_sender_id() or "").strip()
+        if not sender_id_str:
+            return
+
+        now = time.time()
+        cd = max(1, int(self._cfg("cooldown_seconds", 10)))
+        last_time = self._user_last_triggered.get(sender_id_str, 0.0)
+
+        if sender_id_str in self._in_flight_users:
+            return
+
+        if now - last_time < cd:
+            return
+
+        self._in_flight_users.add(sender_id_str)
+        self._user_last_triggered[sender_id_str] = now
+
+        try:
+            target_id, target_name, is_self = self._resolve_target(event)
+            raw_text = str(event.get_message_str() or "").strip()
+            sender_name = str(event.get_sender_name() or "").strip() or "你"
+
+            should_like, reply_text = await self._decide_and_generate_reaction(
+                event,
+                target_name=target_name,
+                sender_name=sender_name,
+                raw_text=raw_text,
+                is_self=is_self,
+            )
+
+            if should_like and target_id:
+                actual_likes, max_likes, status, err_detail = await self._execute_send_like(
+                    event,
+                    target_id,
+                )
+                logger.info(
+                    f"[qq_like] 自主判断同意为 {target_name}({target_id}) 点赞: "
+                    f"actual={actual_likes}, max={max_likes}, status={status}"
+                )
+
+            group_id = event.get_group_id()
+            at_sender = bool(self._cfg("at_sender", False))
+
+            if group_id and at_sender and At is not None and Plain is not None:
+                chain = [At(qq=int(sender_id_str)), Plain(f" {reply_text}")]
+                yield event.chain_result(chain)
+            else:
+                yield event.plain_result(reply_text)
+        except Exception as exc:
+            logger.exception(f"[qq_like] 自主点赞流程发生异常: {exc}")
         finally:
             self._in_flight_users.discard(sender_id_str)
 
@@ -516,19 +668,62 @@ class QQLikePlugin(Star):
     # ─── Plain Message Trigger (no prefix required) ────────────────────
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_plain_message(self, event: AstrMessageEvent):
-        """【普通消息触发】监听无需前缀的点赞请求，并阻断后续未处理拦截。"""
+        """【普通消息触发】监听点赞指令及自然语言求赞问询，并阻断后续未处理拦截。"""
         if not self._cfg("enable_plain_trigger", True):
             return
         if self._claim_event(event):
             return
 
         text = str(event.get_message_str() or "").strip()
-        match = re.match(
-            r"^[/~#.]?\s*(赞我|求赞|点赞|点个赞|帮我点赞|赞我一下|给我点赞|名片赞|like)\b",
-            text,
-            flags=re.IGNORECASE,
-        )
-        if match:
+        is_cmd = bool(self.RE_LIKE_COMMAND.search(text))
+        is_natural = bool(self.RE_LIKE_NATURAL.search(text))
+
+        if is_cmd:
             async for res in self._handle_like_flow(event):
                 yield res
             event.stop_event()
+        elif is_natural and self._cfg("enable_autonomous_decision", True):
+            async for res in self._handle_autonomous_flow(event):
+                yield res
+            event.stop_event()
+
+    # ─── LLM Tool (Function Calling) ───────────────────────────────────
+    @filter.llm_tool(name="send_qq_like")
+    async def send_qq_like(
+        self,
+        event: AstrMessageEvent,
+        target_qq: str = "",
+    ) -> str:
+        """给指定用户或当前发送者点 QQ 资料卡名片赞（送上当日最大上限点赞）。当用户求赞、希望得到点赞、或者询问你是否可以/愿不愿意给TA点赞，且你在人设上决定同意点赞时调用此工具。如果你根据人设或当前情绪不想给TA点赞，则不要调用此工具。
+
+        Args:
+            target_qq(string): 要点赞的目标用户的QQ账号（纯数字字符串）。如果未指定或为空，默认给当前对话者点赞。
+        """
+        if not self._cfg("enable_llm_tool", True):
+            return "点赞工具当前已在插件配置中禁用。"
+
+        sender_id_str = str(event.get_sender_id() or "").strip()
+        target_id_str = str(target_qq or "").strip()
+        if not target_id_str or not target_id_str.isdigit():
+            target_id_str = sender_id_str
+
+        if not target_id_str or not target_id_str.isdigit():
+            return "未找到有效的点赞目标 QQ 号。"
+
+        target_id = int(target_id_str)
+        is_self = (target_id_str == sender_id_str)
+        target_desc = "对方" if is_self else f"用户(QQ:{target_id})"
+
+        actual_likes, max_likes, status, err_detail = await self._execute_send_like(
+            event,
+            target_id,
+        )
+
+        if status == "full_success":
+            return f"点赞成功：已为{target_desc}送出 {actual_likes} 次名片赞（已达本次上限 {max_likes} 次）。请按照你的人设性格回复对方。"
+        elif status == "partial_success":
+            return f"点赞成功：已为{target_desc}送出 {actual_likes} 次名片赞（因达今日限制停止）。请按照你的人设性格回复对方。"
+        elif status == "already_maxed":
+            return f"点赞提示：今日为{target_desc}的点赞已达上限（送出 0 次）。请按照你的人设性格告知对方明天再来。"
+        else:
+            return f"点赞失败：{err_detail or '接口错误'}。请按照你的人设性格告知对方。"

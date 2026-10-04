@@ -15,7 +15,19 @@
     "description": "允许无指令前缀触发",
     "type": "bool",
     "default": true,
-    "hint": "开启后，用户直接在群聊或私聊发送“赞我”、“求赞”等纯文本也能触发点赞与反应。"
+    "hint": "开启后，用户直接在群聊或私聊发送“赞我”、“求赞”或日常问询也能触发。"
+  },
+  "enable_autonomous_decision": {
+    "description": "启用自然语言自主判断点赞",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，面对“会给我点赞吗”、“可以帮我点赞吗”等自然问询，Bot 会结合当前人设与态度自主决定是否点赞与回复；关闭则仅在明确指令下无条件执行。"
+  },
+  "enable_llm_tool": {
+    "description": "启用大模型函数调用工具(LLM Tool)",
+    "type": "bool",
+    "default": true,
+    "hint": "向 AstrBot 注册 send_qq_like 函数工具，使得群聊增强插件或原生会话在常规对话时可由 LLM 自主调用点赞。"
   },
   "enable_llm_reaction": {
     "description": "启用 LLM 人设回复",
