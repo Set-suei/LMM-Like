@@ -1,6 +1,6 @@
 # LLM点赞 (astrbot_plugin_qq_like)
 
-QQ 名片赞与 LLM 互动插件（支持语音插件联动）。
+LLM点赞插件，可以在赞我的同时调用LLM说话
 
 大概效果
 <img width="1416" height="779" alt="T`1HSZ9V`$Y}JM7)1RB4Y`Y" src="https://github.com/user-attachments/assets/379fc296-cacb-4e2c-9f12-00cda5847117" />
