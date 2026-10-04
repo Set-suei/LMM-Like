@@ -1,0 +1,50 @@
+{
+  "max_likes": {
+    "description": "每次尝试点赞的最大次数（上限）",
+    "type": "int",
+    "default": 20,
+    "hint": "QQ 普通用户每日点赞上限通常为 10 次，SVIP 通常为 20 次及以上。"
+  },
+  "chunk_size": {
+    "description": "单次 OneBot 请求点赞次数",
+    "type": "int",
+    "default": 10,
+    "hint": "OneBot v11 规范建议单次 times 不超过 10，插件会自动按此步长分批送出直至达到上限。"
+  },
+  "enable_plain_trigger": {
+    "description": "允许无指令前缀触发",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，用户直接在群聊或私聊发送“赞我”、“求赞”等纯文本也能触发点赞与反应。"
+  },
+  "enable_llm_reaction": {
+    "description": "启用 LLM 人设回复",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后将调用当前生效的 LLM 人格生成互动台词；关闭则直接发送固定提示文本。"
+  },
+  "enable_voice_plugin": {
+    "description": "启用语音插件联动(genie)",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后若检测到已启用的 genie 语音插件，将自动生成日文并送入 TTS 合成语音发送。"
+  },
+  "custom_prompt_guide": {
+    "description": "附加给 LLM 的反应指引（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "可输入额外要求，例如“语气要傲娇一些，提醒对方记得回赞我”等，留空则完全依照当前人设自由发挥。"
+  },
+  "at_sender": {
+    "description": "群聊回复时是否 @ 触发者",
+    "type": "bool",
+    "default": false,
+    "hint": "在群聊中生成回复时，是否在消息头部 @ 对方。"
+  },
+  "cooldown_seconds": {
+    "description": "单用户点赞指令冷却时间（秒）",
+    "type": "int",
+    "default": 10,
+    "hint": "防止用户频繁连续刷屏触发点赞接口。"
+  }
+}
