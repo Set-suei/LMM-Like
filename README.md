@@ -1,4 +1,4 @@
-# LLM点赞 (astrbot_plugin_qq_like)
+# LLM赞我 (astrbot_plugin_qq_like)
 
 LLM点赞插件，可以在赞我的同时调用LLM说话
 
