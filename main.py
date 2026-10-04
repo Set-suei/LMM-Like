@@ -323,8 +323,6 @@ class QQLikePlugin(Star):
     # ─── GENIE Voice Plugin Integration ────────────────────────────────
     def _find_genie(self) -> Any | None:
         """Find loaded and active genie voice plugin instance."""
-        if not self._cfg("enable_voice_plugin", True):
-            return None
         try:
             get_all = getattr(self.context, "get_all_stars", None)
             if get_all is None:
