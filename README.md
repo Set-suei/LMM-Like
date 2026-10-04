@@ -10,3 +10,6 @@ LLM点赞插件，可以在赞我的同时调用LLM说话
 - 性格反应：自动读取当前会话的人设提示词（Persona Prompt），由大模型根据点赞结果作出个性化反应；
 - 语音适配：深度联动 genie 语音合成插件（TTS），遵循会话双语开关，自动输出日文语音协同播报；
 - 冷却防刷：内置用户冷却时间与并发锁。
+
+## 问题反馈聊天群（想玩bot的也可以来）
+<img width="1179" height="2096" alt="8e8ff33bef82fc0160feafcd1e06b75c" src="https://github.com/user-attachments/assets/72bde825-011a-4e58-a1e9-4cf369073586" />
