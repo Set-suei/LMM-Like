@@ -22,7 +22,7 @@ except ImportError:
 @register(
     "astrbot_plugin_qq_like",
     "Codex",
-    "LLM点赞：为用户送上每日上限名片赞，支持LLM自主决策、函数调用(Tool Calling)、当前人设与语音插件(genie)个性化反应",
+    "LLM赞我：为用户送上每日上限名片赞，支持LLM自主决策、函数调用(Tool Calling)、当前人设与语音插件(genie)个性化反应",
     "1.2.0",
 )
 class QQLikePlugin(Star):
