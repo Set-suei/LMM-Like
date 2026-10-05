@@ -2,8 +2,8 @@
   "max_likes": {
     "description": "每次尝试点赞的最大次数（上限）",
     "type": "int",
-    "default": 20,
-    "hint": "QQ 普通用户每日点赞上限通常为 10 次，SVIP 通常为 20 次及以上。"
+    "default": 50,
+    "hint": "QQ 客户端点赞上限通常为 10-20 次，PC 客户端/SVIP 上限最高可达 50 次。"
   },
   "chunk_size": {
     "description": "单次 OneBot 请求点赞次数",

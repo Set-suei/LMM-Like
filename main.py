@@ -144,7 +144,7 @@ class QQLikePlugin(Star):
             (actual_likes, max_likes, status, error_detail)
             status: 'full_success' | 'partial_success' | 'already_maxed' | 'failed'
         """
-        max_likes = max(1, int(self._cfg("max_likes", 20)))
+        max_likes = max(1, int(self._cfg("max_likes", 50)))
         chunk_size = max(1, int(self._cfg("chunk_size", 10)))
 
         actual_likes = 0
