@@ -1,4 +1,4 @@
-name: astrbot_plugin_qq_like
+name: astrbot_plugin_LLM_like
 display_name: LLM赞我
 desc: 自动或自主为用户送上每日上限名片赞，支持LLM自主决策、函数调用(Tool Calling)、当前人设与语音插件(genie)个性化反应。
 version: 1.2.0

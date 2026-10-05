@@ -1,4 +1,4 @@
-# LLM赞我 (astrbot_plugin_qq_like)
+# LLM赞我（astrbot_plugin_LLM_like）
 
 LLM点赞插件，可以在赞我的同时调用LLM说话，支持大模型自主决策点赞与原生函数调用（Tool Calling）。
 
@@ -20,3 +20,4 @@ LLM点赞插件，可以在赞我的同时调用LLM说话，支持大模型自�
 
 ## 问题反馈聊天群（想玩bot的也可以来）
 <img width="360" height="640" alt="8e8ff33bef82fc0160feafcd1e06b75c" src="https://github.com/user-attachments/assets/72bde825-011a-4e58-a1e9-4cf369073586" />
+

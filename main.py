@@ -20,7 +20,7 @@ except ImportError:
 
 
 @register(
-    "astrbot_plugin_qq_like",
+    "astrbot_plugin_LLM_like",
     "Codex",
     "LLM赞我：为用户送上每日上限名片赞，支持LLM自主决策、函数调用(Tool Calling)、当前人设与语音插件(genie)个性化反应",
     "1.2.0",
@@ -122,7 +122,7 @@ class QQLikePlugin(Star):
                                 if callable(call_action_fn):
                                     break
                 except Exception as exc:
-                    logger.debug(f"[qq_like] Failed to resolve bot from platform_manager: {exc}")
+                    logger.debug(f"[LLM_like] Failed to resolve bot from platform_manager: {exc}")
 
         if not callable(call_action_fn):
             raise RuntimeError("未找到可用的 OneBot (aiocqhttp) 客户端连接，无法调用点赞接口。")
@@ -167,7 +167,7 @@ class QQLikePlugin(Star):
                     msg = str(ret.get("msg") or ret.get("wording") or "")
 
                 if ret_code != 0:
-                    logger.info(f"[qq_like] send_like retcode={ret_code}, msg={msg}")
+                    logger.info(f"[LLM_like] send_like retcode={ret_code}, msg={msg}")
                     if any(k in msg for k in limit_keywords):
                         if actual_likes > 0:
                             return actual_likes, max_likes, "partial_success", "已达今日上限"
@@ -179,7 +179,7 @@ class QQLikePlugin(Star):
                     await asyncio.sleep(0.35)
             except Exception as exc:
                 err_text = str(exc)
-                logger.warning(f"[qq_like] send_like exception: {err_text}")
+                logger.warning(f"[LLM_like] send_like exception: {err_text}")
                 is_limit_error = any(k in err_text for k in limit_keywords)
                 if is_limit_error:
                     if actual_likes > 0:
@@ -316,7 +316,7 @@ class QQLikePlugin(Star):
             try:
                 return await self._resolve_persona_prompt(pm, persona_id, umo)
             except Exception as exc:
-                logger.debug(f"[qq_like] Failed to resolve persona prompt: {exc}")
+                logger.debug(f"[LLM_like] Failed to resolve persona prompt: {exc}")
 
         return ""
 
@@ -340,7 +340,7 @@ class QQLikePlugin(Star):
                 ):
                     return md.star_cls
         except Exception as exc:
-            logger.warning(f"[qq_like] 查找 genie 语音插件失败: {exc}")
+            logger.warning(f"[LLM_like] 查找 genie 语音插件失败: {exc}")
         return None
 
     @staticmethod
@@ -415,7 +415,7 @@ class QQLikePlugin(Star):
                         if hint:
                             persona_prompt = f"{persona_prompt or ''}{hint}"
                     except Exception as exc:
-                        logger.warning(f"[qq_like] 读取 genie 双语注入提示失败: {exc}")
+                        logger.warning(f"[LLM_like] 读取 genie 双语注入提示失败: {exc}")
 
                 resp = await provider.text_chat(
                     prompt=prompt,
@@ -439,11 +439,11 @@ class QQLikePlugin(Star):
                                 if display:
                                     return display
                         except Exception as exc:
-                            logger.warning(f"[qq_like] genie 语音接入失败，按原文展示: {exc}")
+                            logger.warning(f"[LLM_like] genie 语音接入失败，按原文展示: {exc}")
 
                     return self._clean_display_text(text)
         except Exception as exc:
-            logger.warning(f"[qq_like] LLM 反应生成失败，将使用兜底回复: {exc}")
+            logger.warning(f"[LLM_like] LLM 反应生成失败，将使用兜底回复: {exc}")
 
         return fallback
 
@@ -490,7 +490,7 @@ class QQLikePlugin(Star):
                     if hint:
                         persona_prompt = f"{persona_prompt or ''}{hint}"
                 except Exception as exc:
-                    logger.warning(f"[qq_like] 读取 genie 双语注入提示失败: {exc}")
+                    logger.warning(f"[LLM_like] 读取 genie 双语注入提示失败: {exc}")
 
             resp = await provider.text_chat(
                 prompt=prompt,
@@ -522,11 +522,11 @@ class QQLikePlugin(Star):
                         if display:
                             return should_like, display
                 except Exception as exc:
-                    logger.warning(f"[qq_like] genie 语音接入失败，按原文展示: {exc}")
+                    logger.warning(f"[LLM_like] genie 语音接入失败，按原文展示: {exc}")
 
             return should_like, self._clean_display_text(text)
         except Exception as exc:
-            logger.warning(f"[qq_like] 自主判断 LLM 生成失败: {exc}")
+            logger.warning(f"[LLM_like] 自主判断 LLM 生成失败: {exc}")
             return True, fallback_agree
 
     # ─── Event Deduplication ───────────────────────────────────────────
@@ -592,7 +592,7 @@ class QQLikePlugin(Star):
             else:
                 yield event.plain_result(reply_text)
         except Exception as exc:
-            logger.exception(f"[qq_like] 处理点赞流程发生异常: {exc}")
+            logger.exception(f"[LLM_like] 处理点赞流程发生异常: {exc}")
             yield event.plain_result(f"点赞时出现异常：{exc}")
         finally:
             self._in_flight_users.discard(sender_id_str)
@@ -636,7 +636,7 @@ class QQLikePlugin(Star):
                     target_id,
                 )
                 logger.info(
-                    f"[qq_like] 自主判断同意为 {target_name}({target_id}) 点赞: "
+                    f"[LLM_like] 自主判断同意为 {target_name}({target_id}) 点赞: "
                     f"actual={actual_likes}, max={max_likes}, status={status}"
                 )
 
@@ -649,7 +649,7 @@ class QQLikePlugin(Star):
             else:
                 yield event.plain_result(reply_text)
         except Exception as exc:
-            logger.exception(f"[qq_like] 自主点赞流程发生异常: {exc}")
+            logger.exception(f"[LLM_like] 自主点赞流程发生异常: {exc}")
         finally:
             self._in_flight_users.discard(sender_id_str)
 
