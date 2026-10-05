@@ -343,17 +343,54 @@ class QQLikePlugin(Star):
             logger.warning(f"[LLM_like] 查找 genie 语音插件失败: {exc}")
         return None
 
+    def _is_genie_active(self, event: AstrMessageEvent) -> bool:
+        """检查当前会话与环境下是否启用了语音插件。"""
+        genie = self._find_genie()
+        if genie is None:
+            return False
+        try:
+            sid = str(getattr(event, "unified_msg_origin", None) or "default")
+            if hasattr(genie, "data_manager") and hasattr(genie.data_manager, "is_tts_disabled"):
+                if genie.data_manager.is_tts_disabled(sid):
+                    return False
+            if hasattr(genie, "_should_auto_tts"):
+                if not genie._should_auto_tts(event, sid):
+                    return False
+            if hasattr(genie, "prompt_injection_enabled") and not genie.prompt_injection_enabled:
+                return False
+            return True
+        except Exception:
+            return False
+
     @staticmethod
     def _clean_display_text(text: str) -> str:
-        """Clean residual tags if voice plugin is not active."""
-        zh_match = re.search(r"<zh>(.*?)</zh>", text, re.DOTALL | re.IGNORECASE)
-        if zh_match:
-            text = zh_match.group(1).strip()
-        else:
-            text = re.sub(r"</?(?:zh|ja|thought|think)>", "", text, flags=re.IGNORECASE).strip()
-        return text
+        """未开启语音插件时，清洗提取纯中文单语言，彻底剥除日文标签与假名行。"""
+        if not text:
+            return ""
+        # 1. 优先提取 <zh>...</zh>
+        zh_matches = re.findall(r"<zh>(.*?)</zh>", text, re.DOTALL | re.IGNORECASE)
+        if zh_matches:
+            return "\n".join(m.strip() for m in zh_matches if m.strip())
+        # 2. 剥除 <ja>...</ja> 及其内容
+        cleaned = re.sub(r"<ja>[\s\S]*?</ja>", "", text, flags=re.IGNORECASE)
+        cleaned = re.sub(r"<think>[\s\S]*?</think>", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"<thought>[\s\S]*?</thought>", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"</?[A-Za-z_][^<>]*>", "", cleaned).strip()
+        # 3. 逐行过滤掉纯假名日文行
+        lines = []
+        kana_re = re.compile(r"[぀-ゟ゠-ヿ]")
+        cjk_re = re.compile(r"[一-鿿]")
+        for line in cleaned.splitlines():
+            line_s = line.strip()
+            if not line_s:
+                continue
+            if kana_re.search(line_s) and not cjk_re.search(line_s):
+                continue
+            lines.append(line_s)
+        res = "\n".join(lines).strip()
+        return res or cleaned
 
-    # ─── LLM Reaction ──────────────────────────────────────────────────
+    # ─── LLM Reaction ────────────────────────────────────────────────────────────────────────────────────────
     async def _generate_reaction(
         self,
         event: AstrMessageEvent,
@@ -364,16 +401,15 @@ class QQLikePlugin(Star):
         status: str,
         error_detail: str,
     ) -> str:
-        """Call LLM to produce persona-based reaction and integrate genie voice if available."""
+        """调用 LLM 生成角色反应。开启语音插件时走双语+日文TTS，未开启时严格输出单语言中文。"""
         target_desc = "用户本人" if is_self else f"用户指定的群友「{target_name}」"
 
-        # Build fallback plain text
         if status == "full_success":
-            fallback = f"好啦，已为{target_name}送上 {actual_likes} 个赞啦！记得也回赞我哦~"
+            fallback = f"刚才成功为{target_name}点了 {actual_likes} 个赞，记得也给我点点哦~"
         elif status == "partial_success":
-            fallback = f"已为{target_name}送上 {actual_likes} 个赞，再点就达到今日上限啦！"
+            fallback = f"已为{target_name}点了 {actual_likes} 个赞，再点就达到系统限制啦。"
         elif status == "already_maxed":
-            fallback = f"今天已经为{target_name}点过赞（或名片赞已达今日上限）啦，明天再来找我吧！"
+            fallback = f"今天已经为{target_name}点过赞，名片赞已达上限，不需要再继续点啦！"
         else:
             fallback = f"点赞出了点小状况：{error_detail or '未知错误'}"
 
@@ -381,24 +417,24 @@ class QQLikePlugin(Star):
             return fallback
 
         if status == "full_success":
-            status_desc = f"你刚刚成功为{target_desc}送出了 {actual_likes} 个名片赞（已达到本次点赞上限）。"
+            status_desc = f"你刚刚成功为{target_desc}送出了 {actual_likes} 个名片赞，已达到本次点赞上限。"
         elif status == "partial_success":
-            status_desc = f"你为{target_desc}送出了 {actual_likes} 个赞，随后因达到今日点赞上限停止。"
+            status_desc = f"你为{target_desc}送出了 {actual_likes} 个赞，因达到今日点赞上限而停止。"
         elif status == "already_maxed":
-            status_desc = f"你尝试为{target_desc}点赞，但系统提示对方今天已经达到点赞上限或今日已被点满（送出 0 个赞）。"
+            status_desc = f"你尝试为{target_desc}点赞，但系统提示对方赞数已经达到今日上限（或已被点满），本次送出 0 个赞。"
         else:
-            status_desc = f"你尝试为{target_desc}点赞时遭遇失败，原因：{error_detail}。"
+            status_desc = f"你尝试为{target_desc}点赞时操作失败，原因：{error_detail}。"
 
         guide = str(self._cfg("custom_prompt_guide", "") or "").strip()
-        guide_note = f"\n额外指引要求：{guide}" if guide else ""
+        guide_note = f"\n额外指令要求：{guide}" if guide else ""
 
         sender_name = str(event.get_sender_name() or "").strip() or "用户"
         prompt = (
-            f"【系统事件】：用户「{sender_name}」发起了点赞互动。\n"
+            f"【系统事件】：用户「{sender_name}」触发了点赞功能。\n"
             f"事件结果：{status_desc}\n"
-            f"请根据你当前的人设、性格与说话风格，直接对用户做出自然的口吻反应（可傲娇、邀功、卖萌、求回赞、吐槽、暖心鼓励等）。"
+            f"请根据你当前的人设、性格与说话风格，直接对用户做出一句自然的口语反应（可包含撒娇、感谢、调侃、炫耀、吐槽、暖心关怀等）。\n"
             f"{guide_note}\n"
-            f"重要要求：直接输出要说的话，不要带任何多余前缀、旁白、括号注释或解释说明。"
+            f"重要要求：直接输出要说的话，不要带任何动作前缀、旁白、内心注释或多余说明。"
         )
 
         try:
@@ -406,19 +442,25 @@ class QQLikePlugin(Star):
             provider = self.context.get_using_provider(umo)
             if provider is not None:
                 persona_prompt = await self._get_persona_prompt(event)
-                genie = self._find_genie()
+                is_voice_active = self._is_genie_active(event)
+                genie = self._find_genie() if is_voice_active else None
 
-                # If genie is loaded, inject bilingual prompt instruction
-                if genie is not None:
+                req_prompt = prompt
+                if is_voice_active and genie is not None:
                     try:
                         hint = genie.build_prompt_injection_hint() or ""
                         if hint:
                             persona_prompt = f"{persona_prompt or ''}{hint}"
+                        req_prompt = (
+                            f"{prompt}\n"
+                            "【特别输出规范】：必须同时严格输出 <zh>中文回复</zh> 与 <ja>日本語の返信</ja> 两种语言标签格式，"
+                            "<ja> 标签内必须为地道日语台词（严禁任何英文、中文或动作括号）。"
+                        )
                     except Exception as exc:
                         logger.warning(f"[LLM_like] 读取 genie 双语注入提示失败: {exc}")
 
                 resp = await provider.text_chat(
-                    prompt=prompt,
+                    prompt=req_prompt,
                     session_id=None,
                     contexts=[],
                     image_urls=[],
@@ -426,12 +468,10 @@ class QQLikePlugin(Star):
                 )
                 text = (resp.completion_text or "").strip()
                 if text:
-                    # Clean surrounding quotes if LLM added them
                     if text.startswith(('"', "“")) and text.endswith(('"', "”")):
                         text = text[1:-1].strip()
 
-                    # Route through genie voice plugin for TTS enqueue and display format
-                    if genie is not None:
+                    if is_voice_active and genie is not None:
                         try:
                             voice_plugin_reply = getattr(genie, "voice_plugin_reply", None)
                             if callable(voice_plugin_reply):
@@ -439,15 +479,29 @@ class QQLikePlugin(Star):
                                 if display:
                                     return display
                         except Exception as exc:
-                            logger.warning(f"[LLM_like] genie 语音接入失败，按原文展示: {exc}")
+                            logger.warning(f"[LLM_like] genie 语音处理失败，退回单语言展示: {exc}")
 
                     return self._clean_display_text(text)
         except Exception as exc:
-            logger.warning(f"[LLM_like] LLM 反应生成失败，将使用兜底回复: {exc}")
+            logger.warning(f"[LLM_like] LLM 响应生成失败，将使用兜底回复: {exc}")
+
+        if fallback:
+            if self._is_genie_active(event):
+                genie = self._find_genie()
+                if genie is not None:
+                    try:
+                        voice_plugin_reply = getattr(genie, "voice_plugin_reply", None)
+                        if callable(voice_plugin_reply):
+                            disp = await voice_plugin_reply(event, fallback)
+                            if disp:
+                                return disp
+                    except Exception as e_fb:
+                        logger.warning(f"[LLM_like] fallback 语音接入失败: {e_fb}")
+            return self._clean_display_text(fallback)
 
         return fallback
 
-    # ─── Autonomous Decision & Generation ──────────────────────────────
+    # ─── Autonomous Decision & Generation ─────────────────────────────────────────────────────────
     async def _decide_and_generate_reaction(
         self,
         event: AstrMessageEvent,
@@ -456,44 +510,51 @@ class QQLikePlugin(Star):
         raw_text: str,
         is_self: bool,
     ) -> tuple[bool, str]:
-        """Ask LLM to autonomously decide whether to like or reject based on current persona."""
+        """自主决定是否点赞并生成反应台词。未开启语音插件时严格单语言中文。"""
         target_desc = f"用户本人「{sender_name}」" if is_self else f"用户「{sender_name}」为你指定的群友「{target_name}」"
 
         prompt = (
-            f"【群聊互动事件】：\n"
-            f"{target_desc}刚刚向你发送了：“{raw_text}”。对方正在向你求赞，或询问你愿不愿意/是否会给TA点赞。\n"
-            f"请你完全根据你当前的人设性格、喜好、对群友的说话口吻以及当前情境，自主判断：你【愿意】还是【不愿/拒绝】给TA点赞？\n"
+            f"【群聊对话事件】：\n"
+            f"{target_desc}刚刚对你发送了：『{raw_text}』，对方表达了想让你为其点赞、询问你愿不愿意/是否给TA点赞。\n"
+            f"请完全基于你当前的人设性格喜好、与群友的熟络程度以及当前语境，自主判断你【愿意】还是【不愿/拒绝】为TA点赞：\n"
             f"【输出格式要求】：\n"
-            f"1. 如果你决定【同意/愿意】点赞：请在第一行开头输出 [ACTION:LIKE]，随后输出你的互动回复台词（可以爽快答应、傲娇表示勉为其难、宠溺、或者要求对方回赞等）。\n"
-            f"2. 如果你决定【拒绝/傲娇不给】点赞：请在第一行开头输出 [ACTION:REJECT]，随后输出你的互动回复台词（可以傲娇拒绝、戏弄、提出刁难要求或吐槽等）。\n"
-            f"【重要提示】：[ACTION:LIKE] 或 [ACTION:REJECT] 仅为系统动作标识符。后面的台词必须直接为角色对话，不要包含任何旁白、思考过程或多余解释。"
+            f"1. 如果你判定【同意/愿意】点赞，请在第一行开头输出 [ACTION:LIKE]，紧接着说出你的口语回复台词（如爽快答应、傲娇表示勉为其难、索要回赞、要求叫你主人等）；\n"
+            f"2. 如果你判定【拒绝/不愿】点赞，请在第一行开头输出 [ACTION:REJECT]，紧接着说出你的口语回复台词（如傲娇拒绝、戏弄嘲弄、提出无理要求、吐槽等）；\n"
+            f"特别提示：[ACTION:LIKE] 与 [ACTION:REJECT] 仅为系统动作标识，随后的台词必须直接为角色对话，不要包含任何旁白、思考过程或多余说明。"
         )
 
         guide = str(self._cfg("custom_prompt_guide", "") or "").strip()
         if guide:
-            prompt += f"\n额外人设指引：{guide}"
+            prompt += f"\n额外人设要求：{guide}"
 
         umo = getattr(event, "unified_msg_origin", None)
         provider = self.context.get_using_provider(umo)
-        genie = self._find_genie()
-
-        fallback_agree = f"哼，看在你这么诚恳的份上，就给你点个赞吧~"
+        fallback_agree = "哼，看在你这么诚恳的份上，就给你点赞吧~"
 
         if provider is None:
             return True, fallback_agree
 
         try:
             persona_prompt = await self._get_persona_prompt(event)
-            if genie is not None:
+            is_voice_active = self._is_genie_active(event)
+            genie = self._find_genie() if is_voice_active else None
+
+            req_prompt = prompt
+            if is_voice_active and genie is not None:
                 try:
                     hint = genie.build_prompt_injection_hint() or ""
                     if hint:
                         persona_prompt = f"{persona_prompt or ''}{hint}"
+                    req_prompt = (
+                        f"{prompt}\n"
+                        "【特别输出规范】：动作标签后的台词部分，必须同时严格输出 <zh>中文回复</zh> 与 <ja>日本語の返信</ja> 两种语言标签格式，"
+                        "<ja> 标签内必须为地道日语台词（严禁任何英文、中文或动作括号）。"
+                    )
                 except Exception as exc:
                     logger.warning(f"[LLM_like] 读取 genie 双语注入提示失败: {exc}")
 
             resp = await provider.text_chat(
-                prompt=prompt,
+                prompt=req_prompt,
                 session_id=None,
                 contexts=[],
                 image_urls=[],
@@ -501,7 +562,7 @@ class QQLikePlugin(Star):
             )
             text = (resp.completion_text or "").strip()
             if not text:
-                return True, fallback_agree
+                return True, self._clean_display_text(fallback_agree)
 
             should_like = True
             if "[ACTION:REJECT]" in text:
@@ -514,7 +575,7 @@ class QQLikePlugin(Star):
             if text.startswith(('"', "“")) and text.endswith(('"', "”")):
                 text = text[1:-1].strip()
 
-            if genie is not None:
+            if is_voice_active and genie is not None:
                 try:
                     voice_plugin_reply = getattr(genie, "voice_plugin_reply", None)
                     if callable(voice_plugin_reply):
@@ -522,14 +583,26 @@ class QQLikePlugin(Star):
                         if display:
                             return should_like, display
                 except Exception as exc:
-                    logger.warning(f"[LLM_like] genie 语音接入失败，按原文展示: {exc}")
+                    logger.warning(f"[LLM_like] genie 语音处理失败，退回单语言展示: {exc}")
 
             return should_like, self._clean_display_text(text)
         except Exception as exc:
-            logger.warning(f"[LLM_like] 自主判断 LLM 生成失败: {exc}")
+            logger.warning(f"[LLM_like] 决策判断 LLM 调用失败: {exc}")
+            if fallback_agree:
+                if self._is_genie_active(event):
+                    genie = self._find_genie()
+                    if genie is not None:
+                        try:
+                            voice_plugin_reply = getattr(genie, "voice_plugin_reply", None)
+                            if callable(voice_plugin_reply):
+                                disp = await voice_plugin_reply(event, fallback_agree)
+                                if disp:
+                                    return True, disp
+                        except Exception:
+                            pass
+                return True, self._clean_display_text(fallback_agree)
             return True, fallback_agree
 
-    # ─── Event Deduplication ───────────────────────────────────────────
     @staticmethod
     def _claim_event(event: AstrMessageEvent) -> bool:
         """Prevent duplicate execution across command and plain message handlers."""
