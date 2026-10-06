@@ -445,7 +445,6 @@ class QQLikePlugin(Star):
                 is_voice_active = self._is_genie_active(event)
                 genie = self._find_genie() if is_voice_active else None
 
-                req_prompt = prompt
                 if is_voice_active and genie is not None:
                     try:
                         hint = genie.build_prompt_injection_hint() or ""
@@ -458,6 +457,14 @@ class QQLikePlugin(Star):
                         )
                     except Exception as exc:
                         logger.warning(f"[LLM_like] 读取 genie 双语注入提示失败: {exc}")
+                        req_prompt = prompt
+                else:
+                    # 未开启语音功能时，显式注入单语言中文提示词，严禁日文以节省token
+                    req_prompt = (
+                        f"{prompt}\n"
+                        "【语言输出要求】：当前未启用语音功能，请直接且仅使用自然流畅的纯中文单语言回复，"
+                        "严禁输出任何日文翻译、日文假名或多语言结构，直接输出纯中文内容以节省token。"
+                    )
 
                 resp = await provider.text_chat(
                     prompt=req_prompt,
@@ -539,7 +546,6 @@ class QQLikePlugin(Star):
             is_voice_active = self._is_genie_active(event)
             genie = self._find_genie() if is_voice_active else None
 
-            req_prompt = prompt
             if is_voice_active and genie is not None:
                 try:
                     hint = genie.build_prompt_injection_hint() or ""
@@ -552,6 +558,14 @@ class QQLikePlugin(Star):
                     )
                 except Exception as exc:
                     logger.warning(f"[LLM_like] 读取 genie 双语注入提示失败: {exc}")
+                    req_prompt = prompt
+            else:
+                # 未开启语音功能时，显式注入单语言中文提示词，严禁日文以节省token
+                req_prompt = (
+                    f"{prompt}\n"
+                    "【语言输出要求】：动作标签后的回复台词，请直接且仅使用自然流畅的纯中文单语言对白，"
+                    "严禁输出任何日文翻译、日文假名或多语言结构，直接输出纯中文内容以节省token。"
+                )
 
             resp = await provider.text_chat(
                 prompt=req_prompt,
