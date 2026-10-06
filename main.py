@@ -30,7 +30,7 @@ class QQLikePlugin(Star):
 
     # Explicit command triggers (e.g. 赞我 / /赞我 / 点赞)
     RE_LIKE_COMMAND = re.compile(
-        r"^[/~#.]?\s*(赞我|求赞|点赞|点个赞|帮我点赞|赞我一下|给我点赞|名片赞|like)\b",
+        r"^[/~#.]?\s*(赞我|求赞|点赞|点个赞|帮我点赞|赞我一下|给我点赞|名片赞|like)(?:[！!~呀啊吧哦呢~\s]*)$",
         re.IGNORECASE,
     )
 
