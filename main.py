@@ -453,7 +453,7 @@ class QQLikePlugin(Star):
                         req_prompt = (
                             f"{prompt}\n"
                             "【特别输出规范】：必须同时严格输出 <zh>中文回复</zh> 与 <ja>日本語の返信</ja> 两种语言标签格式，"
-                            "<ja> 标签内必须为地道日语台词（严禁任何英文、中文或动作括号）。"
+                            "<ja> 标签内必须为地道日语台词（严禁任何英文或动作括号，涉及中文人名/昵称必须转为日文假名读法，如若曦->アガサシ）。"
                         )
                     except Exception as exc:
                         logger.warning(f"[LLM_like] 读取 genie 双语注入提示失败: {exc}")
@@ -554,7 +554,7 @@ class QQLikePlugin(Star):
                     req_prompt = (
                         f"{prompt}\n"
                         "【特别输出规范】：动作标签后的台词部分，必须同时严格输出 <zh>中文回复</zh> 与 <ja>日本語の返信</ja> 两种语言标签格式，"
-                        "<ja> 标签内必须为地道日语台词（严禁任何英文、中文或动作括号）。"
+                        "<ja> 标签内必须为地道日语台词（严禁任何英文或动作括号，涉及中文人名/昵称必须转为日文假名读法，如若曦->アガサシ）。"
                     )
                 except Exception as exc:
                     logger.warning(f"[LLM_like] 读取 genie 双语注入提示失败: {exc}")
