@@ -15,25 +15,25 @@
     "description": "允许无指令前缀触发",
     "type": "bool",
     "default": true,
-    "hint": "开启后，用户直接在群聊或私聊发送“赞我”、“求赞”或以任意自然语言方式要赞均可触发。"
+    "hint": "开启后，用户在 @Bot 前提下发送“赞我”、“求赞”或以任意自然语言方式要赞均可触发（未 @Bot 不触发）。"
   },
   "enable_llm_decision": {
     "description": "启用 LLM 考虑给不给点赞",
     "type": "bool",
     "default": true,
-    "hint": "开启后，无论用户以何种方式要赞（包括直接发送“赞我”指令、@Bot、引用回复或日常对话求赞），均由 LLM 结合当前人设、心情与对话态度自主考虑给不给点赞；关闭则对明确指令直接无条件点赞。"
+    "hint": "开启后，当用户 @Bot 并以任何方式要赞时，均由 LLM 结合当前人设、心情与对话态度自主考虑给不给点赞；关闭则对 @Bot 的明确点赞指令直接无条件点赞。"
   },
   "enable_autonomous_decision": {
     "description": "启用自然语言全方式要赞识别与自主判断",
     "type": "bool",
     "default": true,
-    "hint": "开启后，支持识别各种花式求赞、委婉暗示及常规对话中的要赞意图，并由 Bot 结合人设决定是否给赞。"
+    "hint": "开启后，支持在 @Bot 前提下识别各种花式求赞、委婉暗示及常规对话中的要赞意图，并由 Bot 结合人设决定是否给赞。"
   },
   "enable_llm_tool": {
     "description": "启用大模型函数调用与全局对话联动",
     "type": "bool",
     "default": true,
-    "hint": "向 AstrBot 注册 send_qq_like 工具并注入对话级点赞决策能力，使用户在普通闲聊或群聊增强插件中以任何方式要赞时，LLM 均可考虑并执行点赞。"
+    "hint": "向 AstrBot 注册 send_qq_like 工具并在 @Bot 对话中注入点赞决策能力，使用户在 @Bot 时以任何方式要赞，LLM 均可考虑并执行点赞。"
   },
   "enable_llm_reaction": {
     "description": "启用 LLM 人设回复",

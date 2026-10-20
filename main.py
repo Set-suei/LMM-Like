@@ -33,7 +33,7 @@ class QQLikePlugin(Star):
     )
 
     RE_LEADING_MENTION = re.compile(
-        r"^(?:\s*@[^\s@()（）]{1,32}(?:\(\d{5,12}\)|（\d{5,12}）)?[\s,，。！!？?~～:：]*)+"
+        r"^(?:\s*@[^\s@()（）]{1,32}(?:\s+[~～·•\-—_]+\s*[^\s@()（）]{1,16})?(?:\(\d{5,12}\)|（\d{5,12}）)?[\s,，。！!？?~～:：]*)+"
     )
 
     RE_LIKE_COMMAND = re.compile(
@@ -51,12 +51,17 @@ class QQLikePlugin(Star):
         r"(?:主页|名片|资料卡|资料).*?(?:点个赞|点点赞|点一下赞|点下赞|点赞|刷赞|给个赞|送个赞|来个赞|赞一下|赞下)|"
         r"(?:会|能|可以|想|要|愿不愿意|愿意|敢不敢|能不能|可不可以|行不行|好不好|肯不肯|舍得|要不要|求|麻烦|拜托|快|赶紧|顺便).*?(?:点个赞|点点赞|点一下赞|点下赞|点赞|赞我|名片赞|主页赞|资料卡赞|资料赞|给个赞|给我赞|送个赞|赏个赞|来个赞|回赞|互赞)|"
         r"(?:为什么|为啥|怎么|咋|难道|居然|竟然).*?不.*?(?:点赞|点个赞|赞我|给我赞|给俺赞|名片赞|主页赞)|"
-        r"(?:(?:求|讨|要|给|送|赏|来|点|刷|回|互|骗|混)(?:我|俺|咱)?(?:个|一下|下|点|些)?(?:名片|主页|资料卡|资料)?赞)|(?:赞我|赞下我|赞一下我|给我点赞|给俺点赞|给咱点赞|帮我点赞|想要赞|想要你的赞|要你的赞|点我赞|还没有赞我|还没赞我|不赞我)",
+        r"(?:(?:求|讨|要|给|送|赏|来|刷|回|互|骗|混)(?:我|俺|咱)?(?:个|一下|下|点|些)?(?:名片|主页|资料卡|资料)?赞)|"
+        r"(?:点(?:个|一下|下|点|些)(?:名片|主页|资料卡|资料)?赞)|"
+        r"(?:赞我|赞下我|赞一下我|给我点赞|给俺点赞|给咱点赞|帮我点赞|想要赞|想要你的赞|要你的赞|点我赞|还没有赞我|还没赞我|不赞我)",
         re.IGNORECASE,
     )
 
     RE_META_EXCLUDE = re.compile(
-        r"^(?:点赞失败\s*[:：]|.*?(?:发赞我|要发赞我|发送赞我|说赞我|打赞我|发个赞我|判断赞我|优化.*?赞我|改.*?赞我|测试.*?赞我))",
+        r"^(?:点赞失败\s*[:：]|.*?(?:"
+        r"发赞我|要发赞我|发送赞我|说赞我|打赞我|发个赞我|判断赞我|优化.*?赞我|改.*?赞我|测试.*?赞我|"
+        r"点赞完成|点赞成功|点赞上限|点赞次数|已达上限|达到上限|已经点满|点满了|点满啦|满额了|明天再来|明天再给|回赞了|谢谢.*赞"
+        r"))",
         re.IGNORECASE,
     )
 
@@ -103,38 +108,120 @@ class QQLikePlugin(Star):
         stripped = cls.RE_LEADING_MENTION.sub("", cleaned).strip()
         return stripped or cleaned
 
-    def _is_directed_at_other_human(self, event: AstrMessageEvent, text: str) -> bool:
-        """Check if a group message explicitly @mentions another human (not the bot) without @mentioning the bot."""
+    def _is_at_bot(self, event: AstrMessageEvent) -> bool:
+        """Check whether the message explicitly @mentions this bot (prerequisite for any like request)."""
         msg_obj = getattr(event, "message_obj", None)
-        components = getattr(msg_obj, "message", None) or []
-        self_id_str = str(getattr(msg_obj, "self_id", "") or "").strip()
-        if not self_id_str or not components:
-            return False
+        self_id_str = ""
+        try:
+            if hasattr(event, "get_self_id") and callable(event.get_self_id):
+                self_id_str = str(event.get_self_id() or "").strip()
+        except Exception:
+            pass
+        if not self_id_str and msg_obj is not None:
+            self_id_str = str(getattr(msg_obj, "self_id", "") or "").strip()
+
+        components: list[Any] = []
+        try:
+            if hasattr(event, "get_messages") and callable(event.get_messages):
+                components = list(event.get_messages() or [])
+        except Exception:
+            pass
+        if not components and msg_obj is not None:
+            components = list(getattr(msg_obj, "message", None) or [])
 
         at_qqs: list[str] = []
-        has_reply = False
         for comp in components:
             comp_cls_name = comp.__class__.__name__.lower()
             comp_type = str(getattr(comp, "type", "") or "").lower()
-            if (Reply is not None and isinstance(comp, Reply)) or comp_cls_name == "reply" or comp_type == "reply":
-                has_reply = True
-                continue
             if (At is not None and isinstance(comp, At)) or comp_cls_name == "at" or comp_type == "at":
                 qq_val = str(getattr(comp, "qq", "") or "").strip()
-                if qq_val and qq_val != "all":
+                if qq_val and qq_val.lower() != "all":
                     at_qqs.append(qq_val)
 
-        if not at_qqs:
+        if self_id_str and self_id_str in at_qqs:
+            return True
+
+        # If message has explicit At components pointing only to other users, it did not @ this bot
+        if at_qqs and self_id_str and self_id_str not in at_qqs:
             return False
 
-        if self_id_str in at_qqs:
+        # Support plain-text @Bot (e.g. copy-pasted "@初芝 千岁... 可以给我主页点赞吗" or "@1077741521")
+        raw_candidates: list[str] = []
+        try:
+            raw_str = str(event.get_message_str() or "").strip()
+            if raw_str:
+                raw_candidates.append(raw_str)
+        except Exception:
+            pass
+        if msg_obj is not None:
+            obj_str = str(getattr(msg_obj, "message_str", "") or "").strip()
+            if obj_str and obj_str not in raw_candidates:
+                raw_candidates.append(obj_str)
+            raw_msg = getattr(msg_obj, "raw_message", None)
+            if isinstance(raw_msg, dict):
+                rm_str = str(raw_msg.get("raw_message", "") or "").strip()
+                if rm_str and rm_str not in raw_candidates:
+                    raw_candidates.append(rm_str)
+            elif isinstance(raw_msg, str) and raw_msg.strip():
+                if raw_msg.strip() not in raw_candidates:
+                    raw_candidates.append(raw_msg.strip())
+
+        full_text = " ".join(raw_candidates)
+        cleaned_full = self.RE_INVISIBLE_CHARS.sub("", full_text).strip()
+        if not cleaned_full or "@" not in cleaned_full:
             return False
 
-        norm_text = self._normalize_message_text(text)
-        if has_reply and self.RE_LIKE_COMMAND.search(norm_text) and self.RE_SELF_TARGET.search(norm_text):
-            return False
+        if self_id_str and f"@{self_id_str}" in cleaned_full:
+            return True
 
-        return True
+        bot_names: set[str] = set()
+        try:
+            if hasattr(event, "get_self_name") and callable(event.get_self_name):
+                sname = str(event.get_self_name() or "").strip()
+                if sname:
+                    bot_names.add(sname)
+        except Exception:
+            pass
+
+        try:
+            pm = getattr(self.context, "persona_manager", None)
+            for attr_name in ("default_persona_v3", "default_persona"):
+                val = getattr(pm, attr_name, None) if pm else None
+                pname = self._persona_name_of(val) if val else ""
+                if pname:
+                    base_pname = re.sub(r"[（(].*?[)）]", "", pname).strip()
+                    if base_pname:
+                        bot_names.add(base_pname)
+        except Exception:
+            pass
+
+        bot_id_name_map: dict[str, list[str]] = {
+            "1077741521": ["初芝 千岁", "初芝千岁", "千岁"],
+            "2514095698": ["日向 彼方", "日向彼方", "彼方"],
+            "3213772621": ["遊行寺 夜子", "遊行寺夜子", "游行寺 夜子", "游行寺夜子", "夜子"],
+            "2579870940": ["二阶堂 真红", "二阶堂真红", "真红"],
+            "3265332156": ["莲"],
+            "3577268901": ["诗音"],
+        }
+        if self_id_str in bot_id_name_map:
+            for alias in bot_id_name_map[self_id_str]:
+                bot_names.add(alias)
+
+        for name in bot_names:
+            clean_name = self.RE_INVISIBLE_CHARS.sub("", name).strip()
+            if not clean_name:
+                continue
+            no_space_name = re.sub(r"\s+", "", clean_name)
+            if f"@{clean_name}" in cleaned_full or (
+                no_space_name and f"@{no_space_name}" in re.sub(r"\s+", "", cleaned_full)
+            ):
+                return True
+
+        return False
+
+    def _is_directed_at_other_human(self, event: AstrMessageEvent, text: str) -> bool:
+        """Check if a group message does not @mention this bot."""
+        return not self._is_at_bot(event)
 
     def _resolve_target(self, event: AstrMessageEvent) -> tuple[int, str, bool]:
         """Resolve target QQ number, nickname, and whether target is the sender."""
@@ -862,10 +949,16 @@ class QQLikePlugin(Star):
         finally:
             self._in_flight_users.discard(sender_id_str)
 
-    # ─── Commands (with wake prefix / @) ───────────────────────────────
+    # ─── Commands (requires @Bot) ──────────────────────────────────────
     @filter.command("赞我", alias={"like", "点赞", "赞", "点名片赞", "名片赞", "给我点赞", "求赞", "主页赞", "主页点赞"})
     async def like_cmd(self, event: AstrMessageEvent):
-        """【指令触发】向 Bot 请求名片赞，支持由 LLM 考虑给不给点赞或直接点满。"""
+        """【指令触发】向 Bot 请求名片赞（必须 @Bot 才触发），支持由 LLM 考虑给不给点赞或直接点满。"""
+        if not self._is_at_bot(event):
+            return
+        raw_text = str(event.get_message_str() or "").strip()
+        norm_text = self._normalize_message_text(raw_text)
+        if norm_text and self.RE_META_EXCLUDE.search(norm_text):
+            return
         if self._claim_event(event):
             return
         if self._should_llm_decide():
@@ -876,13 +969,15 @@ class QQLikePlugin(Star):
                 yield res
         event.stop_event()
 
-    # ─── Plain Message Trigger (no prefix required) ────────────────────
+    # ─── Plain Message Trigger (requires @Bot) ─────────────────────────
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_plain_message(self, event: AstrMessageEvent):
-        """【普通消息触发】监听一切形式的点赞指令、自然语言求赞问询及条件追赞。"""
+        """【普通消息触发】监听 @Bot 前提下的一切形式点赞指令、自然语言求赞问询及条件追赞。"""
         if not self._cfg("enable_plain_trigger", True):
             return
         if getattr(event, "_qq_like_claimed", False):
+            return
+        if not self._is_at_bot(event):
             return
 
         raw_text = str(event.get_message_str() or "").strip()
@@ -891,9 +986,6 @@ class QQLikePlugin(Star):
 
         norm_text = self._normalize_message_text(raw_text)
         if not norm_text or self.RE_META_EXCLUDE.search(norm_text):
-            return
-
-        if self._is_directed_at_other_human(event, raw_text):
             return
 
         is_cmd = bool(self.RE_LIKE_COMMAND.search(norm_text))
@@ -935,13 +1027,15 @@ class QQLikePlugin(Star):
             event.stop_event()
             return
 
-    # ─── Global LLM Hooks (Catch Any Creative/Indirect Like Request) ───
+    # ─── Global LLM Hooks (Catch Any Creative/Indirect Like Request with @Bot) ───
     @filter.on_llm_request(priority=50)
     async def on_llm_request(self, event: AstrMessageEvent, req: Any) -> None:
-        """在常规 LLM 对话（含私聊、@唤醒与 group_chat_plus）中注入点赞决策标记说明，让用户以任何方式要赞都能触发。"""
+        """在 @Bot 唤醒的常规 LLM 对话中注入点赞决策标记说明，让用户在 @Bot 前提下以任何方式要赞都能触发。"""
         if not self._cfg("enable_llm_tool", True) and not self._should_llm_decide():
             return
         if getattr(event, "_qq_like_claimed", False):
+            return
+        if not self._is_at_bot(event):
             return
 
         umo = str(getattr(event, "unified_msg_origin", None) or "default")
@@ -997,7 +1091,7 @@ class QQLikePlugin(Star):
         sender_id_str = str(event.get_sender_id() or "").strip()
         challenge_key = (umo, sender_id_str)
 
-        if should_like and not getattr(event, "_qq_like_executed", False):
+        if should_like and self._is_at_bot(event) and not getattr(event, "_qq_like_executed", False):
             self._pending_like_challenges.pop(challenge_key, None)
             target_id, target_name, _ = self._resolve_target(event)
             if target_id:
@@ -1027,6 +1121,8 @@ class QQLikePlugin(Star):
         """
         if not self._cfg("enable_llm_tool", True):
             return "点赞工具当前已在插件配置中禁用。"
+        if not self._is_at_bot(event):
+            return "未执行点赞：当前消息未 @ 提及机器人，仅在用户明确 @ 机器人要赞时才可点赞。"
 
         sender_id_str = str(event.get_sender_id() or "").strip()
         target_id_str = str(target_qq or "").strip()
