@@ -36,6 +36,11 @@ class QQLikePlugin(Star):
         r"^(?:\s*@[^\s@()（）]{1,32}(?:\s+[~～·•\-—_]+\s*[^\s@()（）]{1,16})?(?:\(\d{5,12}\)|（\d{5,12}）)?[\s,，。！!？?~～:：]*)+"
     )
 
+    RE_UNCONDITIONAL_ZANWO = re.compile(
+        r"^[/~#.]?\s*赞我(?:[\s！!？?~～。.…呀啊吧哦呢嘛呗啦捏呜♡❤❤️⭐✨]*)$",
+        re.IGNORECASE,
+    )
+
     RE_LIKE_COMMAND = re.compile(
         r"^[/~#.]?\s*("
         r"赞我|求赞|点赞|点个赞|点点赞|点一下赞|点下赞|帮我点赞|帮我点个赞|赞我一下|赞下我|"
@@ -219,9 +224,57 @@ class QQLikePlugin(Star):
 
         return False
 
+    def _is_unconditional_zanwo(self, event: AstrMessageEvent) -> bool:
+        """Check if the message is a direct '赞我' without @mentioning any other user/bot."""
+        msg_obj = getattr(event, "message_obj", None)
+        self_id_str = ""
+        try:
+            if hasattr(event, "get_self_id") and callable(event.get_self_id):
+                self_id_str = str(event.get_self_id() or "").strip()
+        except Exception:
+            pass
+        if not self_id_str and msg_obj is not None:
+            self_id_str = str(getattr(msg_obj, "self_id", "") or "").strip()
+
+        components: list[Any] = []
+        try:
+            if hasattr(event, "get_messages") and callable(event.get_messages):
+                components = list(event.get_messages() or [])
+        except Exception:
+            pass
+        if not components and msg_obj is not None:
+            components = list(getattr(msg_obj, "message", None) or [])
+
+        for comp in components:
+            comp_cls_name = comp.__class__.__name__.lower()
+            comp_type = str(getattr(comp, "type", "") or "").lower()
+            if (At is not None and isinstance(comp, At)) or comp_cls_name == "at" or comp_type == "at":
+                qq_val = str(getattr(comp, "qq", "") or "").strip()
+                if qq_val and qq_val.lower() != "all" and qq_val != self_id_str:
+                    return False
+
+        raw_str = ""
+        try:
+            raw_str = str(event.get_message_str() or "").strip()
+        except Exception:
+            pass
+        if not raw_str and msg_obj is not None:
+            raw_str = str(getattr(msg_obj, "message_str", "") or "").strip()
+
+        cleaned_raw = self.RE_INVISIBLE_CHARS.sub("", raw_str).strip()
+        if not cleaned_raw:
+            return False
+
+        # If raw text contains '@' (and wasn't @this_bot), do not treat as unconditional 赞我
+        if "@" in cleaned_raw and not self._is_at_bot(event):
+            return False
+
+        norm_text = self._normalize_message_text(cleaned_raw)
+        return bool(self.RE_UNCONDITIONAL_ZANWO.search(norm_text))
+
     def _is_directed_at_other_human(self, event: AstrMessageEvent, text: str) -> bool:
-        """Check if a group message does not @mention this bot."""
-        return not self._is_at_bot(event)
+        """Check if a group message neither @mentions this bot nor is an unconditional 赞我."""
+        return not (self._is_at_bot(event) or self._is_unconditional_zanwo(event))
 
     def _resolve_target(self, event: AstrMessageEvent) -> tuple[int, str, bool]:
         """Resolve target QQ number, nickname, and whether target is the sender."""
@@ -949,11 +1002,13 @@ class QQLikePlugin(Star):
         finally:
             self._in_flight_users.discard(sender_id_str)
 
-    # ─── Commands (requires @Bot) ──────────────────────────────────────
+    # ─── Commands ("赞我"免@触发，其余需 @Bot) ─────────────────────────
     @filter.command("赞我", alias={"like", "点赞", "赞", "点名片赞", "名片赞", "给我点赞", "求赞", "主页赞", "主页点赞"})
     async def like_cmd(self, event: AstrMessageEvent):
-        """【指令触发】向 Bot 请求名片赞（必须 @Bot 才触发），支持由 LLM 考虑给不给点赞或直接点满。"""
-        if not self._is_at_bot(event):
+        """【指令触发】支持直接发“赞我”免@触发，或 @Bot 发送任意点赞指令触发。"""
+        is_at_bot = self._is_at_bot(event)
+        is_unconditional_zanwo = self._is_unconditional_zanwo(event)
+        if not is_at_bot and not is_unconditional_zanwo:
             return
         raw_text = str(event.get_message_str() or "").strip()
         norm_text = self._normalize_message_text(raw_text)
@@ -969,15 +1024,13 @@ class QQLikePlugin(Star):
                 yield res
         event.stop_event()
 
-    # ─── Plain Message Trigger (requires @Bot) ─────────────────────────
+    # ─── Plain Message Trigger ("赞我"免@触发，其余方式需 @Bot) ────────
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_plain_message(self, event: AstrMessageEvent):
-        """【普通消息触发】监听 @Bot 前提下的一切形式点赞指令、自然语言求赞问询及条件追赞。"""
+        """【普通消息触发】直接发“赞我”免@触发；@Bot 前提下支持一切形式的点赞指令、自然语言求赞问询及条件追赞。"""
         if not self._cfg("enable_plain_trigger", True):
             return
         if getattr(event, "_qq_like_claimed", False):
-            return
-        if not self._is_at_bot(event):
             return
 
         raw_text = str(event.get_message_str() or "").strip()
@@ -988,8 +1041,13 @@ class QQLikePlugin(Star):
         if not norm_text or self.RE_META_EXCLUDE.search(norm_text):
             return
 
-        is_cmd = bool(self.RE_LIKE_COMMAND.search(norm_text))
-        is_natural = bool(self.RE_LIKE_NATURAL.search(norm_text))
+        is_at_bot = self._is_at_bot(event)
+        is_unconditional_zanwo = self._is_unconditional_zanwo(event)
+        if not is_at_bot and not is_unconditional_zanwo:
+            return
+
+        is_cmd = is_unconditional_zanwo or (is_at_bot and bool(self.RE_LIKE_COMMAND.search(norm_text)))
+        is_natural = is_at_bot and bool(self.RE_LIKE_NATURAL.search(norm_text))
 
         umo = str(getattr(event, "unified_msg_origin", None) or "default")
         sender_id_str = str(event.get_sender_id() or "").strip()
