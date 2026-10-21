@@ -15,13 +15,13 @@
     "description": "允许无指令前缀触发",
     "type": "bool",
     "default": true,
-    "hint": "开启后，直接发送“赞我”免@即可触发；其他任何自然语言花式要赞需在 @Bot 前提下触发。"
+    "hint": "开启后，直接发送“赞我”免@即可触发且固定同意点赞；@Bot 以任何方式要赞均可触发并由 Bot 看心情决定是否给赞。"
   },
   "enable_llm_decision": {
     "description": "启用 LLM 考虑给不给点赞",
     "type": "bool",
     "default": true,
-    "hint": "开启后，无论是直接发送“赞我”还是 @Bot 以任何方式要赞，均由 LLM 结合当前人设、心情与对话态度自主考虑给不给点赞；关闭则对明确点赞指令直接无条件点赞。"
+    "hint": "开启后，当用户 @Bot 要赞时，由 LLM 结合当前人设、心情与对话态度自主考虑给不给点赞（直接发“赞我”指令则固定同意点赞）。"
   },
   "enable_autonomous_decision": {
     "description": "启用自然语言全方式要赞识别与自主判断",

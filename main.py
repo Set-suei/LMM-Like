@@ -1002,10 +1002,10 @@ class QQLikePlugin(Star):
         finally:
             self._in_flight_users.discard(sender_id_str)
 
-    # ─── Commands ("赞我"免@触发，其余需 @Bot) ─────────────────────────
+    # ─── Commands ("赞我"免@固定同意，@Bot 要赞看Bot心情) ────────────────
     @filter.command("赞我", alias={"like", "点赞", "赞", "点名片赞", "名片赞", "给我点赞", "求赞", "主页赞", "主页点赞"})
     async def like_cmd(self, event: AstrMessageEvent):
-        """【指令触发】支持直接发“赞我”免@触发，或 @Bot 发送任意点赞指令触发。"""
+        """【指令触发】直接发“赞我”免@且固定同意点赞；@Bot 要赞则由 LLM 看心情决定是否给赞。"""
         is_at_bot = self._is_at_bot(event)
         is_unconditional_zanwo = self._is_unconditional_zanwo(event)
         if not is_at_bot and not is_unconditional_zanwo:
@@ -1016,18 +1016,39 @@ class QQLikePlugin(Star):
             return
         if self._claim_event(event):
             return
-        if self._should_llm_decide():
-            async for res in self._handle_autonomous_flow(event, notify_cooldown=True):
+
+        umo = str(getattr(event, "unified_msg_origin", None) or "default")
+        sender_id_str = str(event.get_sender_id() or "").strip()
+        challenge_key = (umo, sender_id_str)
+        challenge_ctx = self._pending_like_challenges.get(challenge_key)
+        if challenge_ctx and (time.time() - float(challenge_ctx.get("time", 0.0)) > 180.0):
+            self._pending_like_challenges.pop(challenge_key, None)
+            challenge_ctx = None
+
+        # 未 @Bot 的直接指令“赞我”（或显式带 / 前缀的“/赞我”）固定同意点赞；@Bot 要赞才看 Bot 心情
+        is_slash_zanwo = norm_text.startswith(("/", "~", "#", ".")) and bool(
+            self.RE_UNCONDITIONAL_ZANWO.search(norm_text)
+        )
+        if (is_unconditional_zanwo and not is_at_bot) or is_slash_zanwo:
+            self._pending_like_challenges.pop(challenge_key, None)
+            async for res in self._handle_like_flow(event):
+                yield res
+        elif self._should_llm_decide():
+            async for res in self._handle_autonomous_flow(
+                event,
+                challenge_ctx=challenge_ctx,
+                notify_cooldown=True,
+            ):
                 yield res
         else:
             async for res in self._handle_like_flow(event):
                 yield res
         event.stop_event()
 
-    # ─── Plain Message Trigger ("赞我"免@触发，其余方式需 @Bot) ────────
+    # ─── Plain Message Trigger ("赞我"免@固定同意，@Bot 要赞看心情) ──────
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_plain_message(self, event: AstrMessageEvent):
-        """【普通消息触发】直接发“赞我”免@触发；@Bot 前提下支持一切形式的点赞指令、自然语言求赞问询及条件追赞。"""
+        """【普通消息触发】直接发“赞我”免@且固定同意；@Bot 前提下支持一切形式的自然语言求赞并看心情决定。"""
         if not self._cfg("enable_plain_trigger", True):
             return
         if getattr(event, "_qq_like_claimed", False):
@@ -1046,9 +1067,6 @@ class QQLikePlugin(Star):
         if not is_at_bot and not is_unconditional_zanwo:
             return
 
-        is_cmd = is_unconditional_zanwo or (is_at_bot and bool(self.RE_LIKE_COMMAND.search(norm_text)))
-        is_natural = is_at_bot and bool(self.RE_LIKE_NATURAL.search(norm_text))
-
         umo = str(getattr(event, "unified_msg_origin", None) or "default")
         sender_id_str = str(event.get_sender_id() or "").strip()
         challenge_key = (umo, sender_id_str)
@@ -1057,7 +1075,24 @@ class QQLikePlugin(Star):
             self._pending_like_challenges.pop(challenge_key, None)
             challenge_ctx = None
 
-        if is_cmd:
+        # 1. 直接发送“赞我”指令（未 @Bot，或显式带 / 前缀）：固定同意点赞
+        is_slash_zanwo = norm_text.startswith(("/", "~", "#", ".")) and bool(
+            self.RE_UNCONDITIONAL_ZANWO.search(norm_text)
+        )
+        if (is_unconditional_zanwo and not is_at_bot) or is_slash_zanwo:
+            if self._claim_event(event):
+                return
+            self._pending_like_challenges.pop(challenge_key, None)
+            async for res in self._handle_like_flow(event):
+                yield res
+            event.stop_event()
+            return
+
+        # 2. @Bot 要赞（含 @Bot 口令与 @Bot 自然语言花式求赞）：看 Bot 心情决定是否给赞
+        is_at_cmd = is_at_bot and bool(self.RE_LIKE_COMMAND.search(norm_text))
+        is_natural = is_at_bot and bool(self.RE_LIKE_NATURAL.search(norm_text))
+
+        if is_at_cmd:
             if self._claim_event(event):
                 return
             if self._should_llm_decide():
