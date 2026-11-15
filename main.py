@@ -855,7 +855,6 @@ class QQLikePlugin(Star):
         last_time = self._user_last_triggered.get(sender_id_str, 0.0)
 
         if sender_id_str in self._in_flight_users:
-            yield event.plain_result("正在为你处理点赞请求，请稍候~")
             return
 
         if now - last_time < cd:
@@ -869,6 +868,7 @@ class QQLikePlugin(Star):
         try:
             target_id, target_name, is_self = self._resolve_target(event)
             if not target_id:
+                self._in_flight_users.discard(sender_id_str)
                 yield event.plain_result("未找到有效的点赞目标 QQ 号。")
                 return
 
@@ -889,6 +889,7 @@ class QQLikePlugin(Star):
 
             group_id = event.get_group_id()
             at_sender = bool(self._cfg("at_sender", False))
+            self._in_flight_users.discard(sender_id_str)
 
             if group_id and at_sender and At is not None and Plain is not None:
                 chain = [At(qq=int(sender_id_str)), Plain(f" {reply_text}")]
@@ -897,6 +898,7 @@ class QQLikePlugin(Star):
                 yield event.plain_result(reply_text)
         except Exception as exc:
             logger.exception(f"[LLM_like] 处理点赞流程发生异常: {exc}")
+            self._in_flight_users.discard(sender_id_str)
             yield event.plain_result(f"点赞时出现异常：{exc}")
         finally:
             self._in_flight_users.discard(sender_id_str)
@@ -918,8 +920,6 @@ class QQLikePlugin(Star):
         last_time = self._user_last_triggered.get(sender_id_str, 0.0)
 
         if sender_id_str in self._in_flight_users:
-            if notify_cooldown:
-                yield event.plain_result("正在为你处理点赞请求，请稍候~")
             return
 
         if now - last_time < cd:
@@ -991,6 +991,7 @@ class QQLikePlugin(Star):
 
             group_id = event.get_group_id()
             at_sender = bool(self._cfg("at_sender", False))
+            self._in_flight_users.discard(sender_id_str)
 
             if group_id and at_sender and At is not None and Plain is not None:
                 chain = [At(qq=int(sender_id_str)), Plain(f" {reply_text}")]
