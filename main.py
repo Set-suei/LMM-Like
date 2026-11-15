@@ -647,31 +647,10 @@ class QQLikePlugin(Star):
         error_detail: str,
     ) -> str:
         """调用 LLM 生成角色反应。开启语音插件时走双语+日文TTS，未开启时严格输出单语言中文。"""
-        target_desc = "用户本人" if is_self else f"用户指定的群友「{target_name}」"
-
-        if status == "full_success":
-            fallback = (
-                f"<zh>刚才成功为{target_name}点了 {actual_likes} 个赞，记得也给我点点哦~</zh>\n"
-                f"<ja>さっき、いいねを{actual_likes}回押しておいたよ。わたしにも返してね。</ja>"
-            )
-        elif status == "partial_success":
-            fallback = (
-                f"<zh>已为{target_name}点了 {actual_likes} 个赞，再点就达到系统限制啦。</zh>\n"
-                f"<ja>いいねを{actual_likes}回押したよ。これ以上は今日の上限みたい。</ja>"
-            )
-        elif status == "already_maxed":
-            fallback = (
-                f"<zh>今天已经为{target_name}点过赞，名片赞已达上限，明天再来找我点吧~</zh>\n"
-                "<ja>今日のいいねはもう上限まで押しちゃったから、また明日来てね。</ja>"
-            )
-        else:
-            fallback = (
-                f"<zh>点赞出了点小状况：{error_detail or '未知错误'}</zh>\n"
-                "<ja>ごめんね、いいねを押す途中でちょっと問題が起きちゃったみたい。</ja>"
-            )
-
         if not self._cfg("enable_llm_reaction", True):
-            return await self._finalize_reply_text(event, fallback)
+            return ""
+
+        target_desc = "用户本人" if is_self else f"用户指定的群友「{target_name}」"
 
         if status == "full_success":
             status_desc = f"你刚刚成功为{target_desc}送出了 {actual_likes} 个名片赞，已达到本次点赞上限。"
@@ -733,9 +712,9 @@ class QQLikePlugin(Star):
                 if text:
                     return await self._finalize_reply_text(event, text)
         except Exception as exc:
-            logger.warning(f"[LLM_like] LLM 响应生成失败，将使用兜底回复: {exc}")
+            logger.warning(f"[LLM_like] LLM 响应生成失败: {exc}")
 
-        return await self._finalize_reply_text(event, fallback) if fallback else fallback
+        return ""
 
     # ─── Autonomous Decision & Generation ──────────────────────────────
     async def _decide_and_generate_reaction(
@@ -778,13 +757,8 @@ class QQLikePlugin(Star):
 
         umo = getattr(event, "unified_msg_origin", None)
         provider = self.context.get_using_provider(umo)
-        fallback_agree = (
-            "<zh>哼，看在你这么诚恳的份上，就给你点赞吧~</zh>\n"
-            "<ja>ふん、そこまで誠意を見せるなら、いいねを押してあげるわ。</ja>"
-        )
-
         if provider is None:
-            return True, fallback_agree
+            return False, ""
 
         try:
             persona_prompt = await self._get_persona_prompt(event)
@@ -820,7 +794,7 @@ class QQLikePlugin(Star):
             )
             text = (resp.completion_text or "").strip()
             if not text:
-                return True, fallback_agree
+                return False, ""
 
             should_like = True
             match = self.RE_ACTION_TAG.search(text)
@@ -832,7 +806,7 @@ class QQLikePlugin(Star):
             return should_like, text
         except Exception as exc:
             logger.warning(f"[LLM_like] 决策判断 LLM 调用失败: {exc}")
-            return True, fallback_agree
+            return False, ""
 
     @staticmethod
     def _claim_event(event: AstrMessageEvent) -> bool:
@@ -847,7 +821,6 @@ class QQLikePlugin(Star):
         """Unconditional like execution with cooldown and message yielding."""
         sender_id_str = str(event.get_sender_id() or "").strip()
         if not sender_id_str:
-            yield event.plain_result("无法识别当前发送者 QQ。")
             return
 
         now = time.time()
@@ -858,8 +831,6 @@ class QQLikePlugin(Star):
             return
 
         if now - last_time < cd:
-            remain = int(cd - (now - last_time))
-            yield event.plain_result(f"点赞过于频繁啦，请稍候 {remain} 秒后再试哦。")
             return
 
         self._in_flight_users.add(sender_id_str)
@@ -869,7 +840,6 @@ class QQLikePlugin(Star):
             target_id, target_name, is_self = self._resolve_target(event)
             if not target_id:
                 self._in_flight_users.discard(sender_id_str)
-                yield event.plain_result("未找到有效的点赞目标 QQ 号。")
                 return
 
             actual_likes, max_likes, status, err_detail = await self._execute_send_like(
@@ -890,6 +860,8 @@ class QQLikePlugin(Star):
             group_id = event.get_group_id()
             at_sender = bool(self._cfg("at_sender", False))
             self._in_flight_users.discard(sender_id_str)
+            if not reply_text:
+                return
 
             if group_id and at_sender and At is not None and Plain is not None:
                 chain = [At(qq=int(sender_id_str)), Plain(f" {reply_text}")]
@@ -898,8 +870,6 @@ class QQLikePlugin(Star):
                 yield event.plain_result(reply_text)
         except Exception as exc:
             logger.exception(f"[LLM_like] 处理点赞流程发生异常: {exc}")
-            self._in_flight_users.discard(sender_id_str)
-            yield event.plain_result(f"点赞时出现异常：{exc}")
         finally:
             self._in_flight_users.discard(sender_id_str)
 
@@ -923,9 +893,6 @@ class QQLikePlugin(Star):
             return
 
         if now - last_time < cd:
-            if notify_cooldown:
-                remain = max(1, int(cd - (now - last_time)))
-                yield event.plain_result(f"点赞过于频繁啦，请稍候 {remain} 秒后再试哦。")
             return
 
         self._in_flight_users.add(sender_id_str)
@@ -952,6 +919,9 @@ class QQLikePlugin(Star):
                 is_self=is_self,
                 challenge_ctx=challenge_ctx,
             )
+            if not should_like and not raw_reply_text:
+                self._in_flight_users.discard(sender_id_str)
+                return
 
             if should_like and target_id:
                 self._pending_like_challenges.pop(challenge_key, None)
@@ -992,6 +962,8 @@ class QQLikePlugin(Star):
             group_id = event.get_group_id()
             at_sender = bool(self._cfg("at_sender", False))
             self._in_flight_users.discard(sender_id_str)
+            if not reply_text:
+                return
 
             if group_id and at_sender and At is not None and Plain is not None:
                 chain = [At(qq=int(sender_id_str)), Plain(f" {reply_text}")]
