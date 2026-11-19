@@ -58,5 +58,41 @@
     "type": "int",
     "default": 10,
     "hint": "防止用户频繁连续刷屏触发点赞接口。"
+  },
+  "enable_multi_bot_coord": {
+    "description": "启用多 Bot 同群协调合并回复",
+    "type": "bool",
+    "default": true,
+    "hint": "当配置了 coord_url 且同群存在多个协调 Bot 时，所有 Bot 照常各自点赞，但仅由随机 1 个 Bot 合并汇报所有人的点赞结果。"
+  },
+  "coord_url": {
+    "description": "多 Bot 协调服务地址",
+    "type": "string",
+    "default": "",
+    "hint": "填写宿主机或局域网运行的协调服务 URL（例如 http://192.168.1.101:18992）；留空则保持单机独立回复。"
+  },
+  "coord_bot_ids": {
+    "description": "参与协调的 Bot QQ 号列表",
+    "type": "list",
+    "default": [],
+    "hint": "填入需要同群防刷屏协调的 Bot QQ 号列表；若留空且协调服务在线，将尝试按已注册 Bot 列表匹配。"
+  },
+  "coord_min_bots": {
+    "description": "触发多 Bot 协调的同群最少 Bot 数",
+    "type": "int",
+    "default": 2,
+    "hint": "当检测到当前群内同时存在不少于此数量的协调 Bot 时启用合并回复（设为 7 则仅 7 个全在同群时启用）。"
+  },
+  "coord_join_window_ms": {
+    "description": "多 Bot 汇聚窗口（毫秒）",
+    "type": "int",
+    "default": 600,
+    "hint": "等待同群其他 Bot 加入协调选举的窗口时长。"
+  },
+  "coord_wait_timeout_ms": {
+    "description": "主回复 Bot 等待其他 Bot 点赞完成超时（毫秒）",
+    "type": "int",
+    "default": 6000,
+    "hint": "随机选出的主回复 Bot 等待其他 Bot 上报点赞结果的最大时长。"
   }
 }

@@ -6,6 +6,7 @@ import re
 import time
 from typing import Any
 
+import aiohttp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
@@ -23,7 +24,7 @@ except ImportError:
     "astrbot_plugin_LLM_like",
     "Codex",
     "LLM赞我：为用户送上每日上限名片赞，支持LLM考虑给不给赞、全方式要赞识别、函数调用(Tool Calling)、当前人设与语音插件(genie)个性化反应",
-    "1.3.0",
+    "1.4.0",
 )
 class QQLikePlugin(Star):
     """QQ profile like plugin with LLM consideration, omni-channel like request recognition, Tool Calling, persona reaction and genie voice adaptation."""
@@ -89,6 +90,14 @@ class QQLikePlugin(Star):
         self._user_last_triggered: dict[str, float] = {}
         self._in_flight_users: set[str] = set()
         self._pending_like_challenges: dict[tuple[str, str], dict[str, Any]] = {}
+        self._group_member_cache: dict[str, tuple[float, set[str]]] = {}
+        self._self_name_cache: dict[str, str] = {}
+        self._coord_session: aiohttp.ClientSession | None = None
+
+    async def terminate(self) -> None:
+        if self._coord_session is not None and not self._coord_session.closed:
+            await self._coord_session.close()
+            self._coord_session = None
 
     def _cfg(self, key: str, default: Any) -> Any:
         """Read configuration value safely."""
@@ -97,6 +106,237 @@ class QQLikePlugin(Star):
             if val is not None:
                 return val
         return default
+
+    # ─── Multi-Bot Coordination Helpers ────────────────────────────────
+    def _coord_url(self) -> str:
+        return str(self._cfg("coord_url", "") or "").strip().rstrip("/")
+
+    def _coord_enabled(self) -> bool:
+        return bool(self._cfg("enable_multi_bot_coord", True)) and bool(self._coord_url())
+
+    def _coord_bot_ids(self) -> set[str]:
+        raw = self._cfg("coord_bot_ids", [])
+        if isinstance(raw, str):
+            parts = re.split(r"[\s,;，；]+", raw.strip())
+        elif isinstance(raw, (list, tuple, set)):
+            parts = [str(x).strip() for x in raw]
+        else:
+            parts = []
+        return {p for p in parts if p and p.isdigit()}
+
+    def _coord_min_bots(self) -> int:
+        try:
+            return max(2, int(self._cfg("coord_min_bots", 2)))
+        except Exception:
+            return 2
+
+    async def _get_coord_session(self) -> aiohttp.ClientSession:
+        if self._coord_session is None or self._coord_session.closed:
+            timeout = aiohttp.ClientTimeout(total=15, connect=2)
+            self._coord_session = aiohttp.ClientSession(timeout=timeout)
+        return self._coord_session
+
+    async def _coord_get(self, path: str, timeout_s: float = 2.0) -> dict[str, Any] | None:
+        base = self._coord_url()
+        if not base:
+            return None
+        try:
+            session = await self._get_coord_session()
+            async with session.get(f"{base}{path}", timeout=aiohttp.ClientTimeout(total=timeout_s)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data if isinstance(data, dict) else None
+        except Exception as exc:
+            logger.debug(f"[LLM_like] coord GET {path} failed: {exc}")
+        return None
+
+    async def _coord_post(
+        self, path: str, payload: dict[str, Any], timeout_s: float = 10.0
+    ) -> dict[str, Any] | None:
+        base = self._coord_url()
+        if not base:
+            return None
+        try:
+            session = await self._get_coord_session()
+            async with session.post(
+                f"{base}{path}",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=timeout_s),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data if isinstance(data, dict) else None
+        except Exception as exc:
+            logger.debug(f"[LLM_like] coord POST {path} failed: {exc}")
+        return None
+
+    @staticmethod
+    def _get_self_id(event: AstrMessageEvent) -> str:
+        try:
+            if hasattr(event, "get_self_id") and callable(event.get_self_id):
+                sid = str(event.get_self_id() or "").strip()
+                if sid:
+                    return sid
+        except Exception:
+            pass
+        msg_obj = getattr(event, "message_obj", None)
+        return str(getattr(msg_obj, "self_id", "") or "").strip()
+
+    async def _get_self_display_name(self, event: AstrMessageEvent) -> str:
+        self_id = self._get_self_id(event)
+        if self_id and self_id in self._self_name_cache:
+            return self._self_name_cache[self_id]
+
+        known_short_names = {
+            "1077741521": "千岁",
+            "2514095698": "彼方",
+            "3213772621": "夜子",
+            "2579870940": "真红",
+            "3446181576": "真红",
+            "3265332156": "菜乃花",
+            "2958806071": "小黑",
+            "3577268901": "诗音",
+        }
+        if self_id in known_short_names:
+            self._self_name_cache[self_id] = known_short_names[self_id]
+            return known_short_names[self_id]
+
+        try:
+            pm = getattr(self.context, "persona_manager", None)
+            umo = getattr(event, "unified_msg_origin", None)
+            persona_id = None
+            conv = getattr(event, "conversation", None)
+            if conv is not None:
+                persona_id = getattr(conv, "persona_id", None)
+            if not persona_id and pm is not None:
+                for fn_name in ("get_default_persona_v3", "get_default_persona"):
+                    fn = getattr(pm, fn_name, None)
+                    if fn is not None:
+                        try:
+                            p = await self._maybe_await(fn(umo) if umo else fn())
+                            pname = self._persona_name_of(p)
+                            if pname:
+                                clean_p = re.sub(r"[（(].*?[)）]", "", pname).strip()
+                                if clean_p:
+                                    if self_id:
+                                        self._self_name_cache[self_id] = clean_p
+                                    return clean_p
+                        except Exception:
+                            pass
+            if persona_id:
+                clean_p = re.sub(r"[（(].*?[)）]", "", str(persona_id)).strip()
+                if clean_p and clean_p not in ("default", "[%None]"):
+                    if self_id:
+                        self._self_name_cache[self_id] = clean_p
+                    return clean_p
+        except Exception:
+            pass
+
+        try:
+            if hasattr(event, "get_self_name") and callable(event.get_self_name):
+                sname = str(event.get_self_name() or "").strip()
+                if sname:
+                    if self_id:
+                        self._self_name_cache[self_id] = sname
+                    return sname
+        except Exception:
+            pass
+
+        return self_id or "Bot"
+
+    @staticmethod
+    def _extract_at_qqs(event: AstrMessageEvent) -> list[str]:
+        msg_obj = getattr(event, "message_obj", None)
+        components: list[Any] = []
+        try:
+            if hasattr(event, "get_messages") and callable(event.get_messages):
+                components = list(event.get_messages() or [])
+        except Exception:
+            pass
+        if not components and msg_obj is not None:
+            components = list(getattr(msg_obj, "message", None) or [])
+
+        at_qqs: list[str] = []
+        for comp in components:
+            comp_cls_name = comp.__class__.__name__.lower()
+            comp_type = str(getattr(comp, "type", "") or "").lower()
+            if (At is not None and isinstance(comp, At)) or comp_cls_name == "at" or comp_type == "at":
+                qq_val = str(getattr(comp, "qq", "") or "").strip()
+                if qq_val and qq_val.lower() != "all":
+                    at_qqs.append(qq_val)
+        return at_qqs
+
+    async def _get_group_members_cached(self, event: AstrMessageEvent, group_id: str) -> set[str]:
+        now = time.monotonic()
+        cached = self._group_member_cache.get(group_id)
+        if cached and (now - cached[0] < 300.0):
+            return cached[1]
+        try:
+            res = await self._call_action(event, "get_group_member_list", group_id=int(group_id))
+            members: set[str] = set()
+            items = res if isinstance(res, list) else (res.get("data", []) if isinstance(res, dict) else [])
+            for item in items:
+                if isinstance(item, dict) and item.get("user_id") is not None:
+                    members.add(str(item["user_id"]).strip())
+            if members:
+                self._group_member_cache[group_id] = (now, members)
+                return members
+        except Exception as exc:
+            logger.debug(f"[LLM_like] get_group_member_list({group_id}) failed: {exc}")
+        return cached[1] if cached else set()
+
+    async def _detect_coord_context(
+        self, event: AstrMessageEvent, at_qqs: list[str] | None = None
+    ) -> dict[str, Any] | None:
+        if not self._coord_enabled():
+            return None
+        group_id = str(event.get_group_id() or "").strip()
+        if not group_id:
+            return None
+
+        self_id = self._get_self_id(event)
+        if not self_id:
+            return None
+
+        coord_ids = self._coord_bot_ids()
+        if coord_ids and self_id not in coord_ids:
+            return None
+
+        at_list = at_qqs if at_qqs is not None else self._extract_at_qqs(event)
+        if not coord_ids:
+            health = await self._coord_get("/health", timeout_s=1.5)
+            if health and isinstance(health.get("registered_bots"), dict):
+                coord_ids = {str(k) for k in health["registered_bots"].keys() if str(k).isdigit()}
+            if self_id:
+                coord_ids.add(self_id)
+
+        if at_list:
+            mentioned_coord = {q for q in at_list if q in coord_ids} if coord_ids else set(at_list)
+            if len(mentioned_coord) >= 2 and self_id in mentioned_coord:
+                return {
+                    "group_id": group_id,
+                    "self_id": self_id,
+                    "expected_count": len(mentioned_coord),
+                }
+            return None
+
+        # Plain-text @Bot targeting a single bot should not trigger multi-bot merge
+        if self._is_at_bot(event):
+            return None
+
+        min_bots = self._coord_min_bots()
+        members = await self._get_group_members_cached(event, group_id)
+        if members and coord_ids:
+            present = members & coord_ids
+            if len(present) < min_bots:
+                return None
+            return {
+                "group_id": group_id,
+                "self_id": self_id,
+                "expected_count": len(present),
+            }
+
+        return None
 
     def _should_llm_decide(self) -> bool:
         """Return whether LLM should consider whether to give a like."""
@@ -205,7 +445,9 @@ class QQLikePlugin(Star):
             "2514095698": ["日向 彼方", "日向彼方", "彼方"],
             "3213772621": ["遊行寺 夜子", "遊行寺夜子", "游行寺 夜子", "游行寺夜子", "夜子"],
             "2579870940": ["二阶堂 真红", "二阶堂真红", "真红"],
-            "3265332156": ["莲"],
+            "3446181576": ["二阶堂 真红", "二阶堂真红", "真红"],
+            "3265332156": ["菜乃花", "莲"],
+            "2958806071": ["小黑"],
             "3577268901": ["诗音"],
         }
         if self_id_str in bot_id_name_map:
@@ -716,6 +958,101 @@ class QQLikePlugin(Star):
 
         return ""
 
+    @staticmethod
+    def _format_merged_like_summary(
+        results: list[dict[str, Any]], target_name: str, is_self: bool
+    ) -> str:
+        total_likes = sum(int(r.get("actual_likes") or 0) for r in results)
+        target_label = "你" if is_self else target_name
+        lines = [f"【名片赞汇总】已为{target_label}累计送出 {total_likes} 赞（共 {len(results)} 位响应）"]
+        for r in results:
+            bname = str(r.get("bot_name") or r.get("bot_id") or "Bot")
+            actual = int(r.get("actual_likes") or 0)
+            status = str(r.get("status") or "")
+            if not r.get("liked", True) or status == "rejected":
+                lines.append(f"• {bname}：暂未点赞")
+            elif status == "full_success":
+                lines.append(f"• {bname}：+{actual} 赞")
+            elif status == "partial_success":
+                lines.append(f"• {bname}：+{actual} 赞（今日已达上限）")
+            elif status == "already_maxed":
+                lines.append(f"• {bname}：今日已达上限")
+            elif status == "timeout":
+                lines.append(f"• {bname}：执行超时未回报")
+            else:
+                err = str(r.get("error_detail") or "").strip()
+                short_err = (err[:24] + "…") if len(err) > 24 else (err or "失败")
+                lines.append(f"• {bname}：未完成（{short_err}）")
+        return "\n".join(lines)
+
+    async def _generate_merged_reaction(
+        self,
+        event: AstrMessageEvent,
+        target_name: str,
+        is_self: bool,
+        results: list[dict[str, Any]],
+    ) -> str:
+        """Generate one concise persona reaction line for merged multi-bot like summary."""
+        if not self._cfg("enable_llm_reaction", True):
+            return ""
+
+        total_likes = sum(int(r.get("actual_likes") or 0) for r in results)
+        success_count = sum(1 for r in results if int(r.get("actual_likes") or 0) > 0)
+        maxed_count = sum(1 for r in results if str(r.get("status") or "") == "already_maxed")
+        target_desc = "用户本人" if is_self else f"用户指定的群友「{target_name}」"
+        sender_name = str(event.get_sender_name() or "").strip() or "用户"
+        guide = str(self._cfg("custom_prompt_guide", "") or "").strip()
+        guide_note = f"\n额外指令要求：{guide}" if guide else ""
+
+        prompt = (
+            f"【系统事件】：群聊内用户「{sender_name}」请求大家点赞，群内 {len(results)} 位机器人同伴已经一并完成处理，"
+            f"其中 {success_count} 位成功点赞、累计为{target_desc}送出 {total_likes} 个名片赞"
+            f"{f'（另有 {maxed_count} 位今日点赞已达上限）' if maxed_count else ''}。\n"
+            "现在由你作为代表统一回复一句即可。请用你当前的人设性格自然地对用户说一句话（可提及大家一起帮他/她点完赞了、调侃或提醒明天再来等）。\n"
+            "重要要求：系统会在你的台词下方自动附带每位同伴的点赞数字清单，因此你只需要说出自然的口语台词，不要自己逐一列举名字和数字清单，也不要加引号或多余说明。"
+            f"{guide_note}"
+        )
+
+        try:
+            umo = getattr(event, "unified_msg_origin", None)
+            provider = self.context.get_using_provider(umo)
+            if provider is not None:
+                persona_prompt = await self._get_persona_prompt(event)
+                is_voice_active = self._is_genie_active(event)
+                genie = self._find_genie() if is_voice_active else None
+                if is_voice_active and genie is not None:
+                    try:
+                        hint = genie.build_prompt_injection_hint() or ""
+                        if hint:
+                            persona_prompt = f"{persona_prompt or ''}{hint}"
+                        req_prompt = (
+                            f"{prompt}\n"
+                            "【特别输出规范】：必须同时严格输出 <zh>中文回复</zh> 与 <ja>日本語の返信</ja> 两种语言标签格式，"
+                            "<ja> 标签内必须为地道日语台词（严禁任何英文或动作括号；所有名字、昵称与用户ID必须一律使用纯正日语读法并将中文昵称/ID/生僻字展开写成平假名或片假名，如小茉->こまり、若曦->アガサシ，严禁按中文普通话拼音或中文数字读法转写）。"
+                        )
+                    except Exception:
+                        req_prompt = prompt
+                else:
+                    req_prompt = (
+                        f"{prompt}\n"
+                        "【语言输出要求】：当前未启用语音功能，请直接且仅使用自然流畅的纯中文单语言回复，"
+                        "严禁输出任何日文翻译、日文假名或多语言结构，直接输出纯中文内容以节省token。"
+                    )
+
+                resp = await provider.text_chat(
+                    prompt=req_prompt,
+                    session_id=None,
+                    contexts=[],
+                    image_urls=[],
+                    system_prompt=persona_prompt or None,
+                )
+                text = (resp.completion_text or "").strip()
+                if text:
+                    return await self._finalize_reply_text(event, text)
+        except Exception as exc:
+            logger.warning(f"[LLM_like] 合并回复 LLM 响应生成失败: {exc}")
+        return ""
+
     # ─── Autonomous Decision & Generation ──────────────────────────────
     async def _decide_and_generate_reaction(
         self,
@@ -817,7 +1154,9 @@ class QQLikePlugin(Star):
         return False
 
     # ─── Unified Execution Pipeline (Direct Unconditional Flow) ────────
-    async def _handle_like_flow(self, event: AstrMessageEvent):
+    async def _handle_like_flow(
+        self, event: AstrMessageEvent, coord_ctx: dict[str, Any] | None = None
+    ):
         """Unconditional like execution with cooldown and message yielding."""
         sender_id_str = str(event.get_sender_id() or "").strip()
         if not sender_id_str:
@@ -842,20 +1181,70 @@ class QQLikePlugin(Star):
                 self._in_flight_users.discard(sender_id_str)
                 return
 
+            batch_id = ""
+            self_name = ""
+            if coord_ctx is not None:
+                self_name = await self._get_self_display_name(event)
+                join_resp = await self._coord_post(
+                    "/coord/like/join",
+                    {
+                        "group_id": coord_ctx["group_id"],
+                        "sender_id": sender_id_str,
+                        "action_key": "like:zanwo",
+                        "bot_id": coord_ctx["self_id"],
+                        "bot_name": self_name,
+                        "expected_count": coord_ctx["expected_count"],
+                        "join_window_ms": int(self._cfg("coord_join_window_ms", 600)),
+                    },
+                    timeout_s=2.0,
+                )
+                if join_resp and join_resp.get("ok"):
+                    batch_id = str(join_resp.get("batch_id") or "")
+
             actual_likes, max_likes, status, err_detail = await self._execute_send_like(
                 event,
                 target_id,
             )
 
-            reply_text = await self._generate_reaction(
-                event,
-                target_name=target_name,
-                is_self=is_self,
-                actual_likes=actual_likes,
-                max_likes=max_likes,
-                status=status,
-                error_detail=err_detail,
-            )
+            reply_text = ""
+            if batch_id and coord_ctx is not None:
+                wait_ms = max(1000, int(self._cfg("coord_wait_timeout_ms", 6000)))
+                fin_resp = await self._coord_post(
+                    "/coord/like/finish",
+                    {
+                        "batch_id": batch_id,
+                        "bot_id": coord_ctx["self_id"],
+                        "bot_name": self_name,
+                        "actual_likes": actual_likes,
+                        "max_likes": max_likes,
+                        "status": status,
+                        "error_detail": err_detail,
+                        "liked": True,
+                        "wait_timeout_ms": wait_ms,
+                    },
+                    timeout_s=(wait_ms / 1000.0) + 3.0,
+                )
+                if fin_resp and fin_resp.get("ok"):
+                    if not fin_resp.get("is_leader"):
+                        self._in_flight_users.discard(sender_id_str)
+                        return
+                    results = fin_resp.get("results") or []
+                    summary_text = self._format_merged_like_summary(results, target_name, is_self)
+                    reaction_line = await self._generate_merged_reaction(
+                        event, target_name=target_name, is_self=is_self, results=results
+                    )
+                    reply_text = f"{reaction_line}\n\n{summary_text}" if reaction_line else summary_text
+
+            if not reply_text:
+                reply_text = await self._generate_reaction(
+                    event,
+                    target_name=target_name,
+                    is_self=is_self,
+                    actual_likes=actual_likes,
+                    max_likes=max_likes,
+                    status=status,
+                    error_detail=err_detail,
+                )
 
             group_id = event.get_group_id()
             at_sender = bool(self._cfg("at_sender", False))
@@ -879,6 +1268,7 @@ class QQLikePlugin(Star):
         event: AstrMessageEvent,
         challenge_ctx: dict[str, Any] | None = None,
         notify_cooldown: bool = False,
+        coord_ctx: dict[str, Any] | None = None,
     ):
         """Autonomous decision flow: Let LLM consider whether to give a like or reject based on persona."""
         sender_id_str = str(event.get_sender_id() or "").strip()
@@ -908,6 +1298,26 @@ class QQLikePlugin(Star):
             else:
                 target_id, target_name, is_self = self._resolve_target(event)
 
+            batch_id = ""
+            self_name = ""
+            if coord_ctx is not None:
+                self_name = await self._get_self_display_name(event)
+                join_resp = await self._coord_post(
+                    "/coord/like/join",
+                    {
+                        "group_id": coord_ctx["group_id"],
+                        "sender_id": sender_id_str,
+                        "action_key": "like:multi_at",
+                        "bot_id": coord_ctx["self_id"],
+                        "bot_name": self_name,
+                        "expected_count": coord_ctx["expected_count"],
+                        "join_window_ms": int(self._cfg("coord_join_window_ms", 600)),
+                    },
+                    timeout_s=2.0,
+                )
+                if join_resp and join_resp.get("ok"):
+                    batch_id = str(join_resp.get("batch_id") or "")
+
             raw_text = str(event.get_message_str() or "").strip()
             sender_name = str(event.get_sender_name() or "").strip() or "你"
 
@@ -919,9 +1329,14 @@ class QQLikePlugin(Star):
                 is_self=is_self,
                 challenge_ctx=challenge_ctx,
             )
-            if not should_like and not raw_reply_text:
+            if not should_like and not raw_reply_text and not batch_id:
                 self._in_flight_users.discard(sender_id_str)
                 return
+
+            actual_likes = 0
+            max_likes = max(1, int(self._cfg("max_likes", 50)))
+            status = "rejected"
+            err_detail = ""
 
             if should_like and target_id:
                 self._pending_like_challenges.pop(challenge_key, None)
@@ -933,18 +1348,6 @@ class QQLikePlugin(Star):
                     f"[LLM_like] LLM考虑后同意为 {target_name}({target_id}) 点赞: "
                     f"actual={actual_likes}, max={max_likes}, status={status}"
                 )
-                if status in ("already_maxed", "failed"):
-                    reply_text = await self._generate_reaction(
-                        event,
-                        target_name=target_name,
-                        is_self=is_self,
-                        actual_likes=actual_likes,
-                        max_likes=max_likes,
-                        status=status,
-                        error_detail=err_detail,
-                    )
-                else:
-                    reply_text = await self._finalize_reply_text(event, raw_reply_text)
             else:
                 logger.info(f"[LLM_like] LLM考虑后决定暂不为 {target_name}({target_id}) 点赞 (REJECT)")
                 clean_bot_reply = self._clean_display_text(raw_reply_text)
@@ -957,7 +1360,52 @@ class QQLikePlugin(Star):
                     "is_self": is_self,
                 }
                 self._user_last_triggered[sender_id_str] = max(0.0, now - cd + 2.0)
-                reply_text = await self._finalize_reply_text(event, raw_reply_text)
+
+            reply_text = ""
+            if batch_id and coord_ctx is not None:
+                wait_ms = max(1000, int(self._cfg("coord_wait_timeout_ms", 6000)))
+                fin_resp = await self._coord_post(
+                    "/coord/like/finish",
+                    {
+                        "batch_id": batch_id,
+                        "bot_id": coord_ctx["self_id"],
+                        "bot_name": self_name,
+                        "actual_likes": actual_likes,
+                        "max_likes": max_likes,
+                        "status": status,
+                        "error_detail": err_detail,
+                        "liked": bool(should_like and target_id),
+                        "wait_timeout_ms": wait_ms,
+                    },
+                    timeout_s=(wait_ms / 1000.0) + 3.0,
+                )
+                if fin_resp and fin_resp.get("ok"):
+                    if not fin_resp.get("is_leader"):
+                        self._in_flight_users.discard(sender_id_str)
+                        return
+                    results = fin_resp.get("results") or []
+                    summary_text = self._format_merged_like_summary(results, target_name, is_self)
+                    reaction_line = await self._generate_merged_reaction(
+                        event, target_name=target_name, is_self=is_self, results=results
+                    )
+                    reply_text = f"{reaction_line}\n\n{summary_text}" if reaction_line else summary_text
+
+            if not reply_text:
+                if should_like and target_id:
+                    if status in ("already_maxed", "failed"):
+                        reply_text = await self._generate_reaction(
+                            event,
+                            target_name=target_name,
+                            is_self=is_self,
+                            actual_likes=actual_likes,
+                            max_likes=max_likes,
+                            status=status,
+                            error_detail=err_detail,
+                        )
+                    else:
+                        reply_text = await self._finalize_reply_text(event, raw_reply_text)
+                else:
+                    reply_text = await self._finalize_reply_text(event, raw_reply_text)
 
             group_id = event.get_group_id()
             at_sender = bool(self._cfg("at_sender", False))
@@ -1002,19 +1450,21 @@ class QQLikePlugin(Star):
         is_slash_zanwo = norm_text.startswith(("/", "~", "#", ".")) and bool(
             self.RE_UNCONDITIONAL_ZANWO.search(norm_text)
         )
+        coord_ctx = await self._detect_coord_context(event)
         if (is_unconditional_zanwo and not is_at_bot) or is_slash_zanwo:
             self._pending_like_challenges.pop(challenge_key, None)
-            async for res in self._handle_like_flow(event):
+            async for res in self._handle_like_flow(event, coord_ctx=coord_ctx):
                 yield res
         elif self._should_llm_decide():
             async for res in self._handle_autonomous_flow(
                 event,
                 challenge_ctx=challenge_ctx,
                 notify_cooldown=True,
+                coord_ctx=coord_ctx,
             ):
                 yield res
         else:
-            async for res in self._handle_like_flow(event):
+            async for res in self._handle_like_flow(event, coord_ctx=coord_ctx):
                 yield res
         event.stop_event()
 
@@ -1056,7 +1506,8 @@ class QQLikePlugin(Star):
             if self._claim_event(event):
                 return
             self._pending_like_challenges.pop(challenge_key, None)
-            async for res in self._handle_like_flow(event):
+            coord_ctx = await self._detect_coord_context(event)
+            async for res in self._handle_like_flow(event, coord_ctx=coord_ctx):
                 yield res
             event.stop_event()
             return
@@ -1068,15 +1519,17 @@ class QQLikePlugin(Star):
         if is_at_cmd:
             if self._claim_event(event):
                 return
+            coord_ctx = await self._detect_coord_context(event)
             if self._should_llm_decide():
                 async for res in self._handle_autonomous_flow(
                     event,
                     challenge_ctx=challenge_ctx,
                     notify_cooldown=True,
+                    coord_ctx=coord_ctx,
                 ):
                     yield res
             else:
-                async for res in self._handle_like_flow(event):
+                async for res in self._handle_like_flow(event, coord_ctx=coord_ctx):
                     yield res
             event.stop_event()
             return
@@ -1084,10 +1537,12 @@ class QQLikePlugin(Star):
         if is_natural and self._cfg("enable_autonomous_decision", True):
             if self._claim_event(event):
                 return
+            coord_ctx = await self._detect_coord_context(event)
             async for res in self._handle_autonomous_flow(
                 event,
                 challenge_ctx=challenge_ctx,
                 notify_cooldown=False,
+                coord_ctx=coord_ctx,
             ):
                 yield res
             event.stop_event()
